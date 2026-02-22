@@ -1,0 +1,14 @@
+{
+  "name": "node-with-gjs",
+  "version": "1.0.0",
+  "description": "Node.js IPC Bridge for GJS",
+  "main": "start.js",
+  "type": "module",
+  "scripts": {
+
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
