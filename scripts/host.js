@@ -57,6 +57,11 @@ function processNestedCommands() {
 function ResolveArg(arg) {
     if (arg.type === 'null') return null;
     if (arg.type === 'primitive') return arg.value;
+    
+    if (arg.type === 'uint8array') {
+        return new Uint8Array(arg.value);
+    }
+    
     if (arg.type === 'ref') return objectStore.get(arg.id);
     if (arg.type === 'array') return arg.value.map(a => ResolveArg(a));
     if (arg.type === 'object') {

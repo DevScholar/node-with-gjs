@@ -91,6 +91,14 @@ node start.js examples/console/await-delay/await-delay.ts
 node start.js examples/gtk/counter/counter.ts
 ```
 
+### GTK4 Drag Box App
+
+A drag box example that demonstrates high frequency IPC.
+
+```bash
+node start.js examples/gtk/drag-box/drag-box.ts
+```
+
 ### GTK4 WebKit Counter App
 
 ```bash

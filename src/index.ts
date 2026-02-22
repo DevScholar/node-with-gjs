@@ -76,8 +76,8 @@ function initialize() {
         process.exit(1);
     });
 
-    const fdWrite = fs.openSync(reqPath, 'r+');
-    const fdRead = fs.openSync(resPath, 'r+');
+    const fdWrite = fs.openSync(reqPath, 'w');
+    const fdRead = fs.openSync(resPath, 'r');
 
     ipc = new IpcSync(fdRead, fdWrite, (res: any) => {
         const cb = callbackRegistry.get(res.callbackId!);
@@ -97,8 +97,11 @@ function initialize() {
 
 function wrapArg(arg: any): any {
     if (arg === null || arg === undefined) return { type: 'null' };
-    
     if (arg.__ref) return { type: 'ref', id: arg.__ref };
+    
+    if (arg instanceof Uint8Array) {
+        return { type: 'uint8array', value: Array.from(arg) };
+    }
     
     if (typeof arg === 'function') {
         const cbId = `cb_${Date.now()}_${Math.random()}`;
