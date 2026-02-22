@@ -97,6 +97,14 @@ node start.js examples/gtk/counter/counter.ts
 node start.js examples/gtk-webkit/counter/counter.ts
 ```
 
+### Adwaita Counter App (libadwaita)
+
+A counter example based on [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/), demonstrating how to use Adwaita-specific components like `Adw.ApplicationWindow` and `Adw.Clamp`.
+
+```bash
+node start.js examples/adwaita/counter/counter.ts
+```
+
 # License
 
 This project is licensed under the MIT License.
