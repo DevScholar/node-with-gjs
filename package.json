@@ -1,6 +1,6 @@
 {
   "name": "@devscholar/node-with-gjs",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "description": "Node.js IPC Bridge for GJS",
   "main": "start.js",
   "type": "module",
