@@ -1,5 +1,5 @@
 {
-  "name": "node-with-gjs",
+  "name": "@devscholar/node-with-gjs",
   "version": "1.0.0",
   "description": "Node.js IPC Bridge for GJS",
   "main": "start.js",
