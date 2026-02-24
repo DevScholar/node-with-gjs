@@ -79,49 +79,20 @@ const app = new Gtk.Application({ application_id: 'org.example.app' });
 
 # Examples
 
-## Console Apps
+Please visit the [node-with-gjs-examples](https://github.com/devscholar/node-with-gjs-examples) repository for working examples.
 
-### Console Input App
+## Quick Start with Examples
 
-```bash
-node start.js examples/console/console-input/console-input.ts
-```
-
-### Await Delay App
+Clone the examples repository alongside this project:
 
 ```bash
-node start.js examples/console/await-delay/await-delay.ts
+git clone https://github.com/devscholar/node-with-gjs-examples.git
+cd node-with-gjs-examples
+npm install
+npm run counter
 ```
 
-## GUI Apps
-
-### GTK4 Counter App
-
-```bash
-node start.js examples/gtk/counter/counter.ts
-```
-
-### GTK4 Drag Box App
-
-A drag box example that demonstrates high frequency IPC.
-
-```bash
-node start.js examples/gtk/drag-box/drag-box.ts
-```
-
-### GTK4 WebKit Counter App
-
-```bash
-node start.js examples/gtk-webkit/counter/counter.ts
-```
-
-### Adwaita Counter App (libadwaita)
-
-A counter example based on [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/), demonstrating how to use Adwaita-specific components like `Adw.ApplicationWindow` and `Adw.Clamp`.
-
-```bash
-node start.js examples/adwaita/counter/counter.ts
-```
+For more examples and details, see the [node-with-gjs-examples README](https://github.com/devscholar/node-with-gjs-examples).
 
 # License
 
