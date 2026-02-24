@@ -1,7 +1,7 @@
 // Run: node start.js examples/console/await-delay/await-delay.ts
-import { loadGi } from '../../../gi-loader.ts';
+import { imports } from '../../../gi-loader.ts';
 
-loadGi('GLib', '2.0');
+imports.gi.GLib;
 
 print('0s');
 await new Promise(resolve => setTimeout(resolve, 1000));

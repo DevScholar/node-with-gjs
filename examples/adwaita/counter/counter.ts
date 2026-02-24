@@ -1,8 +1,9 @@
 // Run: node start.js examples/adwaita/counter/counter.ts
-import { loadGi } from '../../../gi-loader.ts';
+import { imports } from '../../../gi-loader.ts';
 
-const Gtk = loadGi('Gtk', '4.0');
-const Adw = loadGi('Adw', '1');
+imports.gi.versions.Gtk = '4.0';
+imports.gi.versions.Adw = '1';
+const { Gtk, Adw } = imports.gi;
 
 let clickCount = 0;
 

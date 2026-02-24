@@ -1,7 +1,8 @@
 // Run: node start.js examples/gtk/counter/counter.ts
-import { loadGi } from '../../../gi-loader.ts';
+import { imports } from '../../../gi-loader.ts';
 
-const Gtk = loadGi('Gtk', '4.0');
+imports.gi.versions.Gtk = '4.0';
+const { Gtk } = imports.gi;
 
 let clickCount = 0;
 

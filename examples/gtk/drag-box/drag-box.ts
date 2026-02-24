@@ -1,7 +1,8 @@
 // Run: node start.js examples/gtk/drag-box/drag-box.ts
-import { loadGi } from '../../../gi-loader.ts';
+import { imports } from '../../../gi-loader.ts';
 
-const Gtk = loadGi('Gtk', '4.0');
+imports.gi.versions.Gtk = '4.0';
+const { Gtk } = imports.gi;
 
 console.log("--- GTK4 Flicker-free Draggable Square (Cairo) ---");
 

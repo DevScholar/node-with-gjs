@@ -1,10 +1,11 @@
 // Run: node start.js examples/gtk-webkit/counter/counter.ts
-import { loadGi } from '../../../gi-loader.ts';
+import { imports } from '../../../gi-loader.ts';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const Gtk = loadGi('Gtk', '4.0');
-const WebKit = loadGi('WebKit', '6.0');
+imports.gi.versions.Gtk = '4.0';
+imports.gi.versions.WebKit = '6.0';
+const { Gtk, WebKit } = imports.gi;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

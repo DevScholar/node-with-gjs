@@ -31,6 +31,32 @@ pacman -S gtk4 webkitgtk-6.0 gjs
 
 # Usage
 
+## Universal API (Recommended)
+
+All runtimes (Node.js, Bun, Deno) use the same API, compatible with traditional GJS:
+
+```typescript
+import { imports } from './gi-loader.ts';
+
+const { Gtk, WebKit } = imports.gi;
+
+const app = new Gtk.Application({ application_id: 'org.example.app' });
+// ...
+```
+
+### Specifying Versions
+
+To specify a version for a namespace, set it before accessing the namespace:
+
+```typescript
+import { imports } from './gi-loader.ts';
+
+imports.gi.versions.Gtk = '4.0';
+imports.gi.versions.Adw = '1';
+
+const { Gtk, Adw } = imports.gi;
+```
+
 ## Runtime Support
 
 | Runtime | `gi://` URL Syntax | Loader Hooks |
@@ -39,9 +65,9 @@ pacman -S gtk4 webkitgtk-6.0 gjs
 | Bun | ❌ Not supported | ❌ No hooks mechanism |
 | Deno | ❌ Not supported | ❌ No hooks mechanism |
 
-## Node.js
+## Node.js (Alternative)
 
-Node.js supports the `gi://` URL syntax, which is consistent with GJS:
+Node.js also supports the `gi://` URL syntax with experimental loader:
 
 ```typescript
 import Gtk from 'gi://Gtk?version=4.0';
@@ -50,22 +76,6 @@ import WebKit from 'gi://WebKit?version=6.0';
 const app = new Gtk.Application({ application_id: 'org.example.app' });
 // ...
 ```
-
-## Bun / Deno
-
-Bun and Deno do not support Node.js loader hooks, so you need to use the `loadGi` function instead:
-
-```typescript
-import { loadGi } from './gi-loader.ts';
-
-const Gtk = loadGi('Gtk', '4.0');
-const WebKit = loadGi('WebKit', '6.0');
-
-const app = new Gtk.Application({ application_id: 'org.example.app' });
-// ...
-```
-
-**Note:** The `loadGi` function also works with Node.js, useful for older Node.js versions or when not using experimental loader flags.
 
 # Examples
 

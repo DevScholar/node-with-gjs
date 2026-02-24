@@ -1,11 +1,11 @@
 // Run: node start.js examples/console/console-input/console-input.ts
-import { loadGi } from '../../../gi-loader.ts';
+import { imports } from '../../../gi-loader.ts';
 
-const Gio = loadGi('Gio', '2.0');
+const { Gio } = imports.gi;
 
 let GioUnix;
 try {
-    GioUnix = loadGi('GioUnix', '2.0');
+    GioUnix = imports.gi.GioUnix;
 } catch {
     GioUnix = Gio;
 }

@@ -173,8 +173,46 @@ export function init() {
     initialize();
 }
 
-export function loadGiNamespace(namespace: string, version: string) {
+// Internal function - not exposed to users
+function loadGiNamespace(namespace: string, version: string | undefined) {
     initialize();
     const res = ipc!.send({ action: 'LoadNamespace', namespace, version });
     return createProxy(res);
 }
+
+// Namespace cache to avoid creating multiple proxies for the same namespace
+const namespaceCache = new Map<string, any>();
+
+// GI namespace versions
+const giVersions: Record<string, string> = {};
+
+// Create the gi proxy with lazy loading and caching
+const giProxy = new Proxy({} as any, {
+    get(_, namespace: string) {
+        if (namespace === 'versions') {
+            return new Proxy(giVersions, {
+                set(target, prop, value) {
+                    target[prop as string] = value;
+                    // Clear cache for this namespace when version changes
+                    const cacheKey = `${prop as string}@default`;
+                    namespaceCache.delete(cacheKey);
+                    return true;
+                }
+            });
+        }
+        
+        const version = giVersions[namespace];
+        const cacheKey = `${namespace}@${version || 'default'}`;
+        
+        if (!namespaceCache.has(cacheKey)) {
+            namespaceCache.set(cacheKey, loadGiNamespace(namespace, version));
+        }
+        
+        return namespaceCache.get(cacheKey);
+    }
+});
+
+// The main exports object - compatible with GJS imports
+export const imports = {
+    gi: giProxy
+};

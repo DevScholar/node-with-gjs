@@ -1,13 +1,15 @@
 // gi-loader.ts
 // Universal GI namespace loader for Node.js, Bun, and Deno
 // Usage:
-//   import { loadGi } from './gi-loader.ts';
-//   const Gtk = loadGi('Gtk', '4.0');
+//   import { imports } from './gi-loader.ts';
+//   const { Gtk, Gdk } = imports.gi;
+//
+//   // Or specify versions:
+//   imports.gi.versions.Gtk = '4.0';
+//   const Gtk = imports.gi.Gtk;
 
-import { init, loadGiNamespace } from './src/index.ts';
+import { init, imports } from './src/index.ts';
 
 init();
 
-export function loadGi(namespace: string, version: string = '') {
-    return loadGiNamespace(namespace, version);
-}
+export { imports };

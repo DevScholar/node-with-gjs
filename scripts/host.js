@@ -83,7 +83,9 @@ function ResolveArg(arg) {
 
 function executeCommand(cmd) {
     if (cmd.action === 'LoadNamespace') {
-        imports.gi.versions[cmd.namespace] = cmd.version;
+        if (cmd.version) {
+            imports.gi.versions[cmd.namespace] = cmd.version;
+        }
         const ns = imports.gi[cmd.namespace];
         return ConvertToProtocol(ns);
     }
