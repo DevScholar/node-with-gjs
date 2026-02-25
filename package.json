@@ -2,14 +2,13 @@
   "name": "@devscholar/node-with-gjs",
   "version": "0.0.0",
   "description": "Node.js IPC Bridge for GJS",
-  "main": "./gi-loader.ts",
+  "main": "./src/index.ts",
   "type": "module",
   "exports": {
-    ".": "./gi-loader.ts",
-    "./start": "./start.js"
+    ".": "./src/index.ts"
   },
   "bin": {
-    "node-with-gjs": "./start.js"
+
   },
   "scripts": {
 
