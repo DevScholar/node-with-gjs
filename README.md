@@ -33,6 +33,16 @@ pacman -S gtk4 webkitgtk-6.0 gjs
 
 For more examples and details, see the [node-with-gjs-examples README](https://github.com/devscholar/node-with-gjs-examples).
 
+# Tests
+
+Run all tests:
+
+```bash
+npm test
+```
+
+For detailed testing documentation, see [docs/testing.md](docs/testing.md).
+
 # License
 
 This project is licensed under the MIT License.
