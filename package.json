@@ -5,6 +5,16 @@
   "main": "./src/index.ts",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "gjs",
+    "gnome",
+    "gtk",
+    "adwaita",
+    "gui",
+    "webkit",
+    "deno",
+    "bun"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
