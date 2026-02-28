@@ -5,6 +5,9 @@
   "main": "./src/index.ts",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.22.0"
+  },
   "keywords": [
     "gjs",
     "gnome",
