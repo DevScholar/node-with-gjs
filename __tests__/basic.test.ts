@@ -1,8 +1,6 @@
-import { jest } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
-const isLinux = process.platform === 'linux' || process.platform === 'darwin';
-
-(isLinux ? describe : describe.skip)('Basic Module Tests', () => {
+describe('Basic Module Tests', () => {
   let gjs: any;
 
   beforeAll(async () => {

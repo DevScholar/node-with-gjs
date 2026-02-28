@@ -1,8 +1,6 @@
-import { jest } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
-const isLinux = process.platform === 'linux' || process.platform === 'darwin';
-
-(isLinux ? describe : describe.skip)('GTK4 GUI Tests', () => {
+describe('GTK4 GUI Tests', () => {
   let gjs: any;
   let Gtk: any;
   let GLib: any;

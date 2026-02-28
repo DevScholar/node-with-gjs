@@ -1,8 +1,6 @@
-import { jest } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
-const isLinux = process.platform === 'linux' || process.platform === 'darwin';
-
-(isLinux ? describe : describe.skip)('GLib Tests', () => {
+describe('GLib Tests', () => {
   let gjs: any;
   let GLib: any;
 
@@ -43,7 +41,7 @@ const isLinux = process.platform === 'linux' || process.platform === 'darwin';
   });
 });
 
-(isLinux ? describe : describe.skip)('GObject Tests', () => {
+describe('GObject Tests', () => {
   let gjs: any;
   let GObject: any;
 
