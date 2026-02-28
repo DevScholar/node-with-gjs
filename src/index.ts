@@ -60,8 +60,13 @@ function initialize() {
 
     const scriptPath = path.join(__dirname, '..', 'scripts', 'host.js');
     const gjsPath = findGjsPath();
-    proc = cp.spawn('bash', ['-c', `exec "${gjsPath}" -m "${scriptPath}" 3<"${reqPath}" 4>"${resPath}"`], {
-        stdio: 'inherit',
+
+    // Open FIFOs before spawning - order matters to avoid deadlock
+    const fdWrite = fs.openSync(reqPath, 'w');
+    const fdRead = fs.openSync(resPath, 'r');
+
+    proc = cp.spawn(gjsPath, ['-m', scriptPath], {
+        stdio: ['inherit', 'inherit', 'inherit', fdRead, fdWrite],
         env: process.env
     });
 
@@ -75,9 +80,6 @@ function initialize() {
         cleanup();
         process.exit(1);
     });
-
-    const fdWrite = fs.openSync(reqPath, 'w');
-    const fdRead = fs.openSync(resPath, 'r');
 
     ipc = new IpcSync(fdRead, fdWrite, (res: any) => {
         const cb = callbackRegistry.get(res.callbackId!);

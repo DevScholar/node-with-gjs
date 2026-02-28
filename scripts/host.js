@@ -18,8 +18,12 @@ if (!InputStream || !OutputStream) {
     System.exit(1);
 }
 
-const inStream = new InputStream({ fd: 3, close_fd: false });
-const outStream = new OutputStream({ fd: 4, close_fd: false });
+// Get file descriptors from stdio (fd 3 and 4 passed via spawn stdio array)
+const inFd = 3;
+const outFd = 4;
+
+const inStream = new InputStream({ fd: inFd, close_fd: false });
+const outStream = new OutputStream({ fd: outFd, close_fd: false });
 
 const dataIn = new Gio.DataInputStream({ base_stream: inStream });
 const dataOut = new Gio.DataOutputStream({ base_stream: outStream });
