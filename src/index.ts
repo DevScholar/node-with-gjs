@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as cp from 'node:child_process';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { IpcSync } from './ipc.js';
+import { IpcSync } from './ipc.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
