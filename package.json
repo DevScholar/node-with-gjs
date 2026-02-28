@@ -4,12 +4,11 @@
   "description": "Node.js IPC Bridge for GJS",
   "main": "./src/index.ts",
   "type": "module",
+  "license": "MIT",
   "exports": {
     ".": "./src/index.ts"
   },
-  "bin": {
-
-  },
+  "bin": {},
   "scripts": {
     "build": "tsc",
     "test": "node --experimental-transform-types node_modules/vitest/vitest.mjs run"
