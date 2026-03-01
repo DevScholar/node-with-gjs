@@ -1,8 +1,8 @@
 {
   "name": "@devscholar/node-with-gjs",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Node.js IPC Bridge for GJS",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -19,12 +19,13 @@
     "bun"
   ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./dist/index.js"
   },
   "bin": {},
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-transform-types node_modules/vitest/vitest.mjs run"
+    "test": "node --experimental-transform-types node_modules/vitest/vitest.mjs run",
+    "start": "node start.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

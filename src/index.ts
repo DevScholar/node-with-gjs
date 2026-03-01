@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as cp from 'node:child_process';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { IpcSync } from './ipc.ts';
+import { IpcSync } from './ipc.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,13 +60,8 @@ function initialize() {
 
     const scriptPath = path.join(__dirname, '..', 'scripts', 'host.js');
     const gjsPath = findGjsPath();
-
-    // Open FIFOs before spawning - order matters to avoid deadlock
-    const fdWrite = fs.openSync(reqPath, 'w');
-    const fdRead = fs.openSync(resPath, 'r');
-
-    proc = cp.spawn(gjsPath, ['-m', scriptPath], {
-        stdio: ['inherit', 'inherit', 'inherit', fdRead, fdWrite],
+    proc = cp.spawn('bash', ['-c', `exec "${gjsPath}" -m "${scriptPath}" 3<"${reqPath}" 4>"${resPath}"`], {
+        stdio: 'inherit',
         env: process.env
     });
 
@@ -80,6 +75,9 @@ function initialize() {
         cleanup();
         process.exit(1);
     });
+
+    const fdWrite = fs.openSync(reqPath, 'w');
+    const fdRead = fs.openSync(resPath, 'r');
 
     ipc = new IpcSync(fdRead, fdWrite, (res: any) => {
         const cb = callbackRegistry.get(res.callbackId!);
