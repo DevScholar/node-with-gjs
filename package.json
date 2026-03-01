@@ -1,12 +1,12 @@
 {
   "name": "@devscholar/node-with-gjs",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Node.js IPC Bridge for GJS",
   "main": "./dist/index.js",
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=22.22.0"
+    "node": ">=18.0.0"
   },
   "keywords": [
     "gjs",
@@ -24,7 +24,7 @@
   "bin": {},
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-transform-types node_modules/vitest/vitest.mjs run",
+    "test": "vitest run",
     "start": "node start.js"
   },
   "devDependencies": {

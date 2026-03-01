@@ -7,7 +7,7 @@ This is a project that brings GNOME's GJS (GObject Introspection JavaScript runt
 # Requirements
 
 - Linux with GTK4 and WebKitGTK 6.0 installed
-- Node.js 22+ (or Deno/Bun)
+- Node.js 18+ (LTS version recommended, or Deno/Bun)
 - bash (for Unix pipe IPC)
 
 ## Installation
