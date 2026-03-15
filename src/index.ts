@@ -11,9 +11,17 @@ const __dirname = path.dirname(__filename);
 
 const gcRegistry = new FinalizationRegistry((id: string) => {
     try { if (ipc) ipc.send({ action: 'Release', targetId: id }); } catch {}
+    // Clean up callbacks that were registered for this object's method calls.
+    const cbs = objectCallbacks.get(id);
+    if (cbs) {
+        for (const cbId of cbs) callbackRegistry.delete(cbId);
+        objectCallbacks.delete(id);
+    }
 });
 
 const callbackRegistry = new Map<string, Function>();
+// Maps GJS object ID → callback IDs that were registered on behalf of that object.
+const objectCallbacks = new Map<string, string[]>();
 
 let ipc: IpcSync | null = null;
 let proc: cp.ChildProcess | null = null;
@@ -60,7 +68,15 @@ function initialize() {
 
     const scriptPath = path.join(__dirname, '..', 'scripts', 'host.js');
     const gjsPath = findGjsPath();
-    proc = cp.spawn('bash', ['-c', `exec "${gjsPath}" -m "${scriptPath}" 3<"${reqPath}" 4>"${resPath}"`], {
+
+    // Single-quote each path so that spaces and shell metacharacters are safe.
+    // The '\\'' sequence closes the quote, appends a literal ', then reopens it.
+    function sq(s: string): string { return `'${s.replace(/'/g, "'\\''")}'`; }
+
+    proc = cp.spawn('bash', [
+        '-c',
+        `exec ${sq(gjsPath)} -m ${sq(scriptPath)} 3<${sq(reqPath)} 4>${sq(resPath)}`
+    ], {
         stdio: 'inherit',
         env: process.env
     });
@@ -70,6 +86,7 @@ function initialize() {
     process.on('beforeExit', () => { cleanup(); process.exit(0); });
     process.on('exit', cleanup);
     process.on('SIGINT', () => { cleanup(); process.exit(0); });
+    process.on('SIGTERM', () => { cleanup(); process.exit(0); });
     process.on('uncaughtException', (err) => {
         console.error('Node.js Exception:', err);
         cleanup();
@@ -95,28 +112,32 @@ function initialize() {
     initialized = true;
 }
 
-function wrapArg(arg: any): any {
+function wrapArg(arg: any, ownerObjectId?: string): any {
     if (arg === null || arg === undefined) return { type: 'null' };
     if (arg.__ref) return { type: 'ref', id: arg.__ref };
-    
+
     if (arg instanceof Uint8Array) {
         return { type: 'uint8array', value: Array.from(arg) };
     }
-    
+
     if (typeof arg === 'function') {
         const cbId = `cb_${Date.now()}_${Math.random()}`;
         callbackRegistry.set(cbId, arg);
+        if (ownerObjectId) {
+            if (!objectCallbacks.has(ownerObjectId)) objectCallbacks.set(ownerObjectId, []);
+            objectCallbacks.get(ownerObjectId)!.push(cbId);
+        }
         return { type: 'callback', callbackId: cbId };
     }
-    
-    if (Array.isArray(arg)) return { type: 'array', value: arg.map(wrapArg) };
-    
+
+    if (Array.isArray(arg)) return { type: 'array', value: arg.map(a => wrapArg(a, ownerObjectId)) };
+
     if (typeof arg === 'object') {
         const plainObj: any = {};
-        for (let k in arg) plainObj[k] = wrapArg(arg[k]);
+        for (let k in arg) plainObj[k] = wrapArg(arg[k], ownerObjectId);
         return { type: 'object', value: plainObj };
     }
-    
+
     return { type: 'primitive', value: arg };
 }
 
@@ -138,12 +159,12 @@ function createProxy(meta: any): any {
             if (val && val.type === 'function') {
                 return new Proxy(function() {}, {
                     apply: (t, thisArg, args) => {
-                        const netArgs = args.map(wrapArg);
+                        const netArgs = args.map(a => wrapArg(a, id));
                         const res = ipc!.send({ action: 'Invoke', targetId: id, methodName: prop, args: netArgs });
                         return createProxy(res);
                     },
                     construct: (t, args) => {
-                        const netArgs = args.map(wrapArg);
+                        const netArgs = args.map(a => wrapArg(a, id));
                         const res = ipc!.send({ action: 'NewProp', targetId: id, property: prop, args: netArgs });
                         return createProxy(res);
                     }
@@ -154,12 +175,12 @@ function createProxy(meta: any): any {
 
         set: (target: any, prop: string | symbol, value: any) => {
             if (typeof prop !== 'string') return false;
-            ipc!.send({ action: 'Set', targetId: id, property: prop, value: wrapArg(value) });
+            ipc!.send({ action: 'Set', targetId: id, property: prop, value: wrapArg(value, id) });
             return true;
         },
 
         construct: (target: any, args: any[]) => {
-            const netArgs = args.map(wrapArg);
+            const netArgs = args.map(a => wrapArg(a, id));
             const res = ipc!.send({ action: 'New', typeId: id, args: netArgs });
             return createProxy(res);
         }

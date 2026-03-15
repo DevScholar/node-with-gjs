@@ -5,6 +5,10 @@ import * as fs from 'node:fs';
 let readBuffer = Buffer.alloc(0);
 
 export function readLineSync(fd: number): string | null {
+    // NOTE: fs.readSync blocks the entire Node.js thread. Timers and event callbacks
+    // cannot fire while blocked here. A true timeout requires Worker threads (architectural change).
+    // On Unix FIFOs, if the GJS process exits the write-end closes and readSync returns 0
+    // bytes (EOF), so process crashes are naturally detected without a timeout.
     while (true) {
         // 1. If the buffer already contains a complete line, extract and return it with minimal overhead
         const newlineIdx = readBuffer.indexOf(10); // 10 is the ASCII code for \n

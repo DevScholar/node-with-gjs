@@ -12,17 +12,27 @@ npm test
 
 ### Run Specific Test Files
 
+Pass a filename pattern directly to Vitest:
+
 ```bash
-npm test -- --testPathPatterns=gtk4
-npm test -- --testPathPatterns=glib
-npm test -- --testPathPatterns=basic
+npm test -- gtk4
+npm test -- glib
+npm test -- basic
 ```
 
 ## Test Configuration
 
-Tests are configured to run **serially** (`maxWorkers: 1`) because the module uses a singleton pattern with global state for the IPC connection to GJS. Running tests in parallel would cause conflicts between multiple GJS processes.
+Tests must run **serially** because the module uses a singleton pattern with global state for the IPC connection to GJS. Running tests in parallel would cause conflicts between multiple GJS processes. Configure this in `vitest.config.ts`:
 
-If you need to run tests in parallel, you would need to refactor the module to support multiple instances (see [jest.config.js](../jest.config.js)).
+```ts
+import { defineConfig } from 'vitest/config';
+export default defineConfig({
+  test: {
+    pool: 'forks',
+    poolOptions: { forks: { singleFork: true } }
+  }
+});
+```
 
 ## Test Files
 
@@ -33,6 +43,8 @@ Test files are located in the `__tests__` directory:
 | `basic.test.ts` | Basic module functionality tests (init, imports.gi) |
 | `gtk4.test.ts` | GTK4 GUI component tests (Application, Box, Label, Button, enums) |
 | `glib.test.ts` | GLib and GObject tests (get_user_name, get_home_dir, etc.) |
+
+> **Note:** The `__tests__/` directory and test files are not yet included in the repository. Contributions welcome.
 
 ## Platform Support
 
@@ -67,8 +79,6 @@ When writing new tests, keep in mind:
 Example test structure:
 
 ```typescript
-import { jest } from '@jest/globals';
-
 const isLinux = process.platform === 'linux' || process.platform === 'darwin';
 
 (isLinux ? describe : describe.skip)('My Tests', () => {

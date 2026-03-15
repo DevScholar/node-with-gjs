@@ -145,14 +145,24 @@ function bindIPCEvent() {
                 System.exit(0);
                 return GLib.SOURCE_REMOVE;
             }
-            const cmd = JSON.parse(line);
-            
+            let cmd;
+            try {
+                cmd = JSON.parse(line);
+            } catch (e) {
+                // Malformed JSON from Node.js side — send error and continue
+                dataOut.put_string(JSON.stringify({ type: 'error', message: 'Invalid JSON: ' + e.toString() }) + '\n', null);
+                return GLib.SOURCE_CONTINUE;
+            }
             let response;
-            try { response = executeCommand(cmd); } 
+            try { response = executeCommand(cmd); }
             catch (e) { response = { type: 'error', message: e.toString() }; }
-            
+
             dataOut.put_string(JSON.stringify(response) + '\n', null);
-        } catch (e) {}
+        } catch (e) {
+            // Pipe I/O error — Node.js side is gone, exit cleanly
+            System.exit(0);
+            return GLib.SOURCE_REMOVE;
+        }
         return GLib.SOURCE_CONTINUE;
     });
 }
