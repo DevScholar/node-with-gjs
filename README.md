@@ -16,17 +16,7 @@ Note: These packages are supposed to be pre-installed with GNOME-based Linux dis
 
 For Ubuntu/Debian:
 ```bash
-apt install libgtk-4-1 libwebkitgtk-6.0-0 gjs
-```
-
-For Fedora:
-```bash
-dnf install gtk4 webkitgtk6.0 gjs
-```
-
-For Arch Linux:
-```bash
-pacman -S gtk4 webkitgtk-6.0 gjs
+apt install libgtk-4-1 libwebkitgtk-6.0-0 gjs gir1.2-adw-1
 ```
 
 # Usage
