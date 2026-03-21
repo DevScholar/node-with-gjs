@@ -1,6 +1,6 @@
 # Node with GJS
 
-⚠️ This project is still in Alpha stage, and API is subject to change.
+This project is in Beta stage.
 
 This is a project that brings GNOME's GJS (GObject Introspection JavaScript runtime) to Node.js, allowing you to use GTK4 and WebKit from JavaScript/TypeScript with a Node.js-like API. Since this project uses IPC instead of C++ Addon, it is compatible not only with Node but also with Deno and Bun.
 
