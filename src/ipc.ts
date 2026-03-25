@@ -1,103 +1,109 @@
 // src/ipc.ts
 import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { Worker, MessageChannel, receiveMessageOnPort } from 'worker_threads';
+import type { MessagePort } from 'worker_threads';
+import { fileURLToPath } from 'node:url';
 
-// Use a global/shared read buffer to handle redundant data across calls
-let readBuffer = Buffer.alloc(0);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-export function readLineSync(fd: number): string | null {
-    // NOTE: fs.readSync blocks the entire Node.js thread. Timers and event callbacks
-    // cannot fire while blocked here. A true timeout requires Worker threads (architectural change).
-    // On Unix FIFOs, if the GJS process exits the write-end closes and readSync returns 0
-    // bytes (EOF), so process crashes are naturally detected without a timeout.
-    while (true) {
-        // 1. If the buffer already contains a complete line, extract and return it with minimal overhead
-        const newlineIdx = readBuffer.indexOf(10); // 10 is the ASCII code for \n
-        if (newlineIdx !== -1) {
-            const line = readBuffer.subarray(0, newlineIdx).toString('utf8');
-            readBuffer = readBuffer.subarray(newlineIdx + 1);
-            return line;
-        }
-
-        // 2. Otherwise, try to read a large chunk from the pipe
-        const chunk = Buffer.alloc(8192); // Attempt to read 8KB each time
-        let bytesRead = 0;
-        try {
-            bytesRead = fs.readSync(fd, chunk, 0, 8192, null);
-        } catch (e) {
-            return null;
-        }
-
-        if (bytesRead === 0) {
-            if (readBuffer.length === 0) return null;
-            const line = readBuffer.toString('utf8');
-            readBuffer = Buffer.alloc(0);
-            return line;
-        }
-
-        // 3. Append the newly read data to the buffer
-        readBuffer = Buffer.concat([readBuffer, chunk.subarray(0, bytesRead)]);
-    }
-}
-
-export class IpcSync {
-    private exited: boolean = false;
+export class IpcWorker {
+    private worker: Worker;
+    private port: MessagePort;
+    private exited = false;
 
     constructor(
         private fdRead: number,
         private fdWrite: number,
-        private onEvent: (msg: any) => any 
-    ) {}
+        private onEvent: (msg: any) => any
+    ) {
+        const { port1, port2 } = new MessageChannel();
+        this.port = port1;
+
+        const workerPath = path.join(__dirname, 'ipc-worker.js');
+        this.worker = new Worker(workerPath, {
+            workerData: { fdRead, port: port2 },
+            transferList: [port2]
+        });
+        this.worker.on('error', (e) =>
+            console.error('[node-with-gjs] IPC worker error:', e)
+        );
+    }
+
+    // Spin-receive: returns the next message from the worker.
+    // receiveMessageOnPort() is a synchronous, non-blocking call.
+    // GJS responds in microseconds, so the spin is extremely brief.
+    private readOne(): { kind: string; data?: any } {
+        let msg: ReturnType<typeof receiveMessageOnPort>;
+        while (!(msg = receiveMessageOnPort(this.port))) {}
+        return msg.message;
+    }
+
+    // Handle a GJS-initiated event: call the JS callback and send the return
+    // value back to GJS so the signal handler gets the correct return value.
+    private handleEvent(eventData: any) {
+        let result: any = null;
+        try {
+            result = this.onEvent(eventData);
+        } catch (e) {
+            console.error('[node-with-gjs] Callback error:', e);
+        }
+        try {
+            fs.writeSync(this.fdWrite, JSON.stringify({ type: 'reply', result }) + '\n');
+        } catch {}
+    }
+
+    // Wait for the response to the current command.
+    // Any events that arrive in the interim are handled inline (GJS is blocked
+    // in processNestedCommands waiting for the reply, so we must handle them
+    // before the actual response arrives).
+    private waitResponse(): any {
+        while (true) {
+            const msg = this.readOne();
+            if (msg.kind === 'eof') {
+                this.exited = true;
+                return { type: 'exit' };
+            }
+            if (msg.kind === 'event') {
+                this.handleEvent(msg.data);
+                continue; // keep waiting for the real response
+            }
+            const res = msg.data;
+            if (res.type === 'error') throw new Error(`GJS Host Error: ${res.message}`);
+            return res;
+        }
+    }
 
     send(cmd: any): any {
         if (this.exited) return { type: 'exit' };
-
         try {
             fs.writeSync(this.fdWrite, JSON.stringify(cmd) + '\n');
-        } catch (e) {
-            throw new Error("Pipe closed (Write failed)");
+        } catch {
+            throw new Error('Pipe closed (Write failed)');
         }
+        return this.waitResponse();
+    }
 
-        while (true) {
-            const line = readLineSync(this.fdRead);
-            if (line === null) throw new Error("Pipe closed (Read EOF)");
-            if (!line.trim()) continue;
-
-            let res: any;
-            try {
-                res = JSON.parse(line);
-            } catch (e) {
-                throw new Error(`Invalid JSON from host: ${line}`);
-            }
-
-            if (res.type === 'event') {
-                let result = null;
-                try {
-                    result = this.onEvent(res);
-                } catch (e) {
-                    console.error("Callback Error:", e);
-                }
-                
-                const reply = { type: 'reply', result: result };
-                try {
-                    fs.writeSync(this.fdWrite, JSON.stringify(reply) + '\n');
-                } catch {}
-                continue; 
-            }
-
-            if (res.type === 'error') throw new Error(`GJS Host Error: ${res.message}`);
-            
-            if (res.type === 'exit') {
-                this.exited = true;
-                return res;
-            }
-            
-            return res;
+    // Drain events that arrived between send() calls.
+    // Called by setInterval (16 ms) so that callbacks fired during app.run()
+    // are delivered to JS even when the main thread isn't inside send().
+    // Because GJS blocks in processNestedCommands until it gets a reply,
+    // calling handleEvent() here sends the reply and unblocks GJS.
+    drainEvents() {
+        if (this.exited) return;
+        let msg: ReturnType<typeof receiveMessageOnPort>;
+        while ((msg = receiveMessageOnPort(this.port))) {
+            const { kind, data } = msg.message;
+            if (kind === 'event') this.handleEvent(data);
+            // unexpected 'response' messages between commands are harmless; ignore
         }
     }
 
     close() {
         this.exited = true;
-        if (this.fdRead) try { fs.closeSync(this.fdRead); } catch {}
-        if (this.fdWrite) try { fs.closeSync(this.fdWrite); } catch {}
+        this.worker.terminate();
+        try { fs.closeSync(this.fdRead); } catch {}
+        try { fs.closeSync(this.fdWrite); } catch {}
     }
 }

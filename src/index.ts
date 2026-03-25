@@ -4,14 +4,13 @@ import * as path from 'node:path';
 import * as cp from 'node:child_process';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { IpcSync } from './ipc.js';
+import { IpcWorker } from './ipc.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const gcRegistry = new FinalizationRegistry((id: string) => {
     try { if (ipc) ipc.send({ action: 'Release', targetId: id }); } catch {}
-    // Clean up callbacks that were registered for this object's method calls.
     const cbs = objectCallbacks.get(id);
     if (cbs) {
         for (const cbId of cbs) callbackRegistry.delete(cbId);
@@ -20,24 +19,25 @@ const gcRegistry = new FinalizationRegistry((id: string) => {
 });
 
 const callbackRegistry = new Map<string, Function>();
-// Maps GJS object ID → callback IDs that were registered on behalf of that object.
 const objectCallbacks = new Map<string, string[]>();
 
-let ipc: IpcSync | null = null;
+let ipc: IpcWorker | null = null;
 let proc: cp.ChildProcess | null = null;
 let initialized = false;
 let reqPath = '';
 let resPath = '';
+let pollInterval: ReturnType<typeof setInterval> | null = null;
 
 function cleanup() {
     if (!initialized) return;
     initialized = false;
-    
+
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     if (ipc) try { ipc.close(); } catch {}
     if (proc && !proc.killed) try { proc.kill('SIGKILL'); } catch {}
     if (fs.existsSync(reqPath)) try { fs.unlinkSync(reqPath); } catch {}
     if (fs.existsSync(resPath)) try { fs.unlinkSync(resPath); } catch {}
-    
+
     proc = null;
     ipc = null;
 }
@@ -53,7 +53,7 @@ function findGjsPath(): string {
 
 function initialize() {
     if (initialized) return;
-    
+
     const token = `${process.pid}-${Date.now()}`;
     reqPath = path.join(os.tmpdir(), `gjs-req-${token}.pipe`);
     resPath = path.join(os.tmpdir(), `gjs-res-${token}.pipe`);
@@ -69,8 +69,6 @@ function initialize() {
     const scriptPath = path.join(__dirname, '..', 'scripts', 'host.js');
     const gjsPath = findGjsPath();
 
-    // Single-quote each path so that spaces and shell metacharacters are safe.
-    // The '\\'' sequence closes the quote, appends a literal ', then reopens it.
     function sq(s: string): string { return `'${s.replace(/'/g, "'\\''")}'`; }
 
     proc = cp.spawn('bash', [
@@ -96,7 +94,7 @@ function initialize() {
     const fdWrite = fs.openSync(reqPath, 'w');
     const fdRead = fs.openSync(resPath, 'r');
 
-    ipc = new IpcSync(fdRead, fdWrite, (res: any) => {
+    ipc = new IpcWorker(fdRead, fdWrite, (res: any) => {
         const cb = callbackRegistry.get(res.callbackId!);
         if (cb) {
             const wrappedArgs = (res.args || []).map((arg: any) => createProxy(arg));
@@ -106,7 +104,7 @@ function initialize() {
     });
 
     (globalThis as any).print = (...args: any[]) => {
-        ipc!.send({ action: 'Print', args: args.map(wrapArg) });
+        ipc!.send({ action: 'Print', args: args.map(arg => wrapArg(arg)) });
     };
 
     initialized = true;
@@ -155,10 +153,16 @@ function createProxy(meta: any): any {
             if (typeof prop !== 'string') return undefined;
 
             const val = ipc!.send({ action: 'Get', targetId: id, property: prop });
-            
+
             if (val && val.type === 'function') {
                 return new Proxy(function() {}, {
                     apply: (t, thisArg, args) => {
+                        // Transparently intercept app.run([]) so it doesn't block.
+                        if (prop === 'run' && args.length <= 1 && (!args[0] || Array.isArray(args[0]))) {
+                            ipc!.send({ action: 'RunApp', targetId: id });
+                            startPolling();
+                            return undefined;
+                        }
                         const netArgs = args.map(a => wrapArg(a, id));
                         const res = ipc!.send({ action: 'Invoke', targetId: id, methodName: prop, args: netArgs });
                         return createProxy(res);
@@ -194,46 +198,43 @@ export function init() {
     initialize();
 }
 
-// Internal function - not exposed to users
-function loadGiNamespace(namespace: string, version: string | undefined) {
-    initialize();
-    const res = ipc!.send({ action: 'LoadNamespace', namespace, version });
-    return createProxy(res);
+// Called by setInterval to deliver events that arrived between send() calls.
+// The Worker always receives GJS output; events queue up in the MessagePort
+// until drained here (or inline inside send()'s waitResponse loop).
+function drainEvents() {
+    if (!ipc) return;
+    ipc.drainEvents();
 }
 
-// Namespace cache to avoid creating multiple proxies for the same namespace
-const namespaceCache = new Map<string, any>();
+function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(drainEvents, 16);
+    (pollInterval as any).unref?.();
+}
 
-// GI namespace versions
-const giVersions: Record<string, string> = {};
-
-// Create the gi proxy with lazy loading and caching
-const giProxy = new Proxy({} as any, {
-    get(_, namespace: string) {
-        if (namespace === 'versions') {
-            return new Proxy(giVersions, {
-                set(target, prop, value) {
-                    target[prop as string] = value;
-                    // Clear cache for this namespace when version changes
-                    const cacheKey = `${prop as string}@default`;
-                    namespaceCache.delete(cacheKey);
-                    return true;
-                }
-            });
-        }
-        
-        const version = giVersions[namespace];
-        const cacheKey = `${namespace}@${version || 'default'}`;
-        
-        if (!namespaceCache.has(cacheKey)) {
-            namespaceCache.set(cacheKey, loadGiNamespace(namespace, version));
-        }
-        
-        return namespaceCache.get(cacheKey);
-    }
-});
-
-// The main exports object - compatible with GJS imports
 export const imports = {
-    gi: giProxy
+    gi: new Proxy({} as any, {
+        get(_, namespace: string) {
+            if (namespace === 'versions') {
+                return new Proxy(giVersions, {
+                    set(target, prop, value) {
+                        target[prop as string] = value;
+                        namespaceCache.delete(`${prop as string}@default`);
+                        return true;
+                    }
+                });
+            }
+            const version = giVersions[namespace];
+            const cacheKey = `${namespace}@${version || 'default'}`;
+            if (!namespaceCache.has(cacheKey)) {
+                initialize();
+                const res = ipc!.send({ action: 'LoadNamespace', namespace, version });
+                namespaceCache.set(cacheKey, createProxy(res));
+            }
+            return namespaceCache.get(cacheKey);
+        }
+    })
 };
+
+const namespaceCache = new Map<string, any>();
+const giVersions: Record<string, string> = {};
