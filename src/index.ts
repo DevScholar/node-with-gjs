@@ -9,8 +9,20 @@ import { IpcWorker } from './ipc.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Delay between event-drain polls while the GTK main loop is running.
+const POLL_INTERVAL_MS = 16;
+
+// Callbacks registered from Node.js side, keyed by the id sent to GJS.
+const callbackRegistry = new Map<string, Function>();
+// Maps GJS object id → callback ids registered on its behalf (for bulk cleanup).
+const objectCallbacks = new Map<string, string[]>();
+// Ids of GJS objects whose Node.js proxies have been GC'd; drained in drainEvents().
+const releaseQueue: string[] = [];
+
+// FinalizationRegistry: only do in-process work here (push to queue).
+// Actual IPC happens later in drainEvents() where ipc is known to be alive.
 const gcRegistry = new FinalizationRegistry((id: string) => {
-    try { if (ipc) ipc.send({ action: 'Release', targetId: id }); } catch {}
+    releaseQueue.push(id);
     const cbs = objectCallbacks.get(id);
     if (cbs) {
         for (const cbId of cbs) callbackRegistry.delete(cbId);
@@ -18,8 +30,8 @@ const gcRegistry = new FinalizationRegistry((id: string) => {
     }
 });
 
-const callbackRegistry = new Map<string, Function>();
-const objectCallbacks = new Map<string, string[]>();
+const namespaceCache = new Map<string, any>();
+const giVersions: Record<string, string> = {};
 
 let ipc: IpcWorker | null = null;
 let proc: cp.ChildProcess | null = null;
@@ -103,9 +115,13 @@ function initialize() {
         return null;
     });
 
-    (globalThis as any).print = (...args: any[]) => {
-        ipc!.send({ action: 'Print', args: args.map(arg => wrapArg(arg)) });
-    };
+    // Preserve GJS's global print() — only patch if not already defined so we
+    // don't clobber a pre-existing definition (e.g. from a test framework).
+    if (!(globalThis as any).print) {
+        (globalThis as any).print = (...args: any[]) => {
+            ipc!.send({ action: 'Print', args: args.map(arg => wrapArg(arg)) });
+        };
+    }
 
     initialized = true;
 }
@@ -157,14 +173,14 @@ function createProxy(meta: any): any {
             if (val && val.type === 'function') {
                 return new Proxy(function() {}, {
                     apply: (t, thisArg, args) => {
-                        // Transparently intercept app.run([]) so it doesn't block.
-                        if (prop === 'run' && args.length <= 1 && (!args[0] || Array.isArray(args[0]))) {
-                            ipc!.send({ action: 'RunApp', targetId: id });
+                        const netArgs = args.map(a => wrapArg(a, id));
+                        const res = ipc!.send({ action: 'Invoke', targetId: id, methodName: prop, args: netArgs });
+                        // GJS detected this is Gio.Application.run() and entered the main loop.
+                        // Start the drain loop so events are delivered during app lifetime.
+                        if (res?.type === 'run_started') {
                             startPolling();
                             return undefined;
                         }
-                        const netArgs = args.map(a => wrapArg(a, id));
-                        const res = ipc!.send({ action: 'Invoke', targetId: id, methodName: prop, args: netArgs });
                         return createProxy(res);
                     },
                     construct: (t, args) => {
@@ -198,17 +214,20 @@ export function init() {
     initialize();
 }
 
-// Called by setInterval to deliver events that arrived between send() calls.
-// The Worker always receives GJS output; events queue up in the MessagePort
-// until drained here (or inline inside send()'s waitResponse loop).
 function drainEvents() {
     if (!ipc) return;
+    // Release GC'd objects before draining callbacks — safe to do IPC here.
+    if (releaseQueue.length > 0) {
+        for (const id of releaseQueue.splice(0)) {
+            try { ipc.send({ action: 'Release', targetId: id }); } catch {}
+        }
+    }
     ipc.drainEvents();
 }
 
 function startPolling() {
     if (pollInterval) return;
-    pollInterval = setInterval(drainEvents, 16);
+    pollInterval = setInterval(drainEvents, POLL_INTERVAL_MS);
     (pollInterval as any).unref?.();
 }
 
@@ -235,6 +254,3 @@ export const imports = {
         }
     })
 };
-
-const namespaceCache = new Map<string, any>();
-const giVersions: Record<string, string> = {};

@@ -65,9 +65,7 @@ function processNestedCommands() {
         let response;
         try { response = executeCommand(cmd); }
         catch (e) { response = { type: 'error', message: e.toString() }; }
-        if (response.type !== '__skip') {
-            dataOut.put_string(JSON.stringify(response) + '\n', null);
-        }
+        dataOut.put_string(JSON.stringify(response) + '\n', null);
     }
 }
 
@@ -160,20 +158,6 @@ function executeCommand(cmd) {
         print(...cmd.args.map(a => ResolveArg(a)));
         return { type: 'void' };
     }
-    // RunApp: pre-send {type:'ok'} so Node.js send() returns immediately,
-    // then block inside app.run(). The GLib main loop inside app.run() continues
-    // to process io_add_watch, so IPC commands (nested processNestedCommands calls
-    // from signal callbacks) are served normally while the app is running.
-    if (cmd.action === 'RunApp') {
-        const target = objectStore.get(cmd.targetId);
-        // Pre-send ok — Node.js Worker reads this and forwards to main thread,
-        // which unblocks the main thread's waitResponse() spin loop.
-        dataOut.put_string(JSON.stringify({ type: 'ok' }) + '\n', null);
-        target.run([]);
-        // app.run() returns when all windows are closed.
-        // Return sentinel so io_add_watch does NOT send a second response.
-        return { type: '__skip' };
-    }
     throw new Error(`Unknown Action ${cmd.action}`);
 }
 
@@ -193,13 +177,35 @@ function bindIPCEvent() {
                 dataOut.put_string(JSON.stringify({ type: 'error', message: 'Invalid JSON: ' + e.toString() }) + '\n', null);
                 return GLib.SOURCE_CONTINUE;
             }
+            // Detect Gio.Application.run() by actual runtime type — no heuristics.
+            // Pre-send {type:'run_started'} so Node.js unblocks immediately,
+            // then enter the blocking GTK main loop. The GLib event loop inside
+            // app.run() continues to fire io_add_watch, so signal-callback IPC
+            // (processNestedCommands) keeps working while the app is running.
+            // Returning SOURCE_CONTINUE without a second dataOut.put_string avoids
+            // sending a spurious extra response — no sentinel needed.
+            if (cmd.action === 'Invoke' && cmd.methodName === 'run') {
+                const target = objectStore.get(cmd.targetId);
+                let isGioApp = false;
+                try { isGioApp = target instanceof imports.gi.Gio.Application; } catch {}
+                if (isGioApp) {
+                    dataOut.put_string(JSON.stringify({ type: 'run_started' }) + '\n', null);
+                    const argsArray = (cmd.args || []).map(a => ResolveArg(a));
+                    target.run(argsArray[0] || []);
+                    // app.run() returned — all windows closed.
+                    // Quit the GLib main loop so the GJS process exits.
+                    // This causes the Worker's readSync() to get EOF, the Worker
+                    // thread exits, and Node.js has nothing left to keep it alive.
+                    mainLoop.quit();
+                    return GLib.SOURCE_CONTINUE;
+                }
+            }
+
             let response;
             try { response = executeCommand(cmd); }
             catch (e) { response = { type: 'error', message: e.toString() }; }
 
-            if (response.type !== '__skip') {
-                dataOut.put_string(JSON.stringify(response) + '\n', null);
-            }
+            dataOut.put_string(JSON.stringify(response) + '\n', null);
         } catch (e) {
             System.exit(0);
             return GLib.SOURCE_REMOVE;
