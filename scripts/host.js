@@ -178,12 +178,28 @@ function bindIPCEvent() {
                 if (isGioApp) {
                     dataOut.put_string(JSON.stringify({ type: 'run_started' }) + '\n', null);
                     const argsArray = (cmd.args || []).map(a => ResolveArg(a));
-                    target.run(argsArray[0] || []);
-                    // app.run() returned — all windows closed.
-                    // Quit the GLib main loop so the GJS process exits.
-                    // This causes the Worker's readSync() to get EOF, the Worker
-                    // thread exits, and Node.js has nothing left to keep it alive.
-                    mainLoop.quit();
+                    // Hold the app so it doesn't exit immediately after 'activate' returns
+                    // with no windows.  In the polling model the Node.js-side activate
+                    // callback runs ~16 ms later (first Poll); without this hold, GTK4
+                    // detects no windows at activate-return time, decrements use_count to 0,
+                    // and calls g_application_quit() before the window is created.
+                    // app.quit() (called from close-request) uses g_main_loop_quit() directly
+                    // and exits cleanly regardless of this extra hold.
+                    target.hold();
+                    // Schedule target.run() via idle_add instead of calling it directly here.
+                    // GLib sources have can_recurse=false by default: while this io_add_watch
+                    // callback is on the stack, the same source cannot be re-dispatched.
+                    // Calling target.run() directly would block this callback indefinitely,
+                    // so Poll commands from Node.js could never trigger the io_add_watch again
+                    // → deadlock.  An idle_add creates a separate source, allowing the
+                    // io_add_watch to fire freely inside target.run()'s nested GTK main loop.
+                    GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                        target.run(argsArray[0] || []);
+                        // app.run() returned — all windows closed.
+                        // Quit the GLib main loop so the GJS process exits.
+                        mainLoop.quit();
+                        return GLib.SOURCE_REMOVE;
+                    });
                     return GLib.SOURCE_CONTINUE;
                 }
             }
