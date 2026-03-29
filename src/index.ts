@@ -12,8 +12,12 @@ const __dirname = path.dirname(__filename);
 // Delay between event-drain polls while the GTK main loop is running.
 const POLL_INTERVAL_MS = 16;
 
-// Callbacks registered from Node.js side, keyed by the id sent to GJS.
-const callbackRegistry = new Map<string, Function>();
+/**
+ * Registry of all active callbacks registered from Node.js.
+ * Exported so host packages (e.g. node-with-window) can register callbacks
+ * that aren't tied to a specific proxy object lifetime (e.g. menu actions).
+ */
+export const callbackRegistry = new Map<string, Function>();
 // Maps GJS object id → callback ids registered on its behalf (for bulk cleanup).
 const objectCallbacks = new Map<string, string[]>();
 // Ids of GJS objects whose Node.js proxies have been GC'd; drained in drainEvents().
@@ -106,14 +110,7 @@ function initialize() {
     const fdWrite = fs.openSync(reqPath, 'w');
     const fdRead = fs.openSync(resPath, 'r');
 
-    ipc = new IpcWorker(fdRead, fdWrite, (res: any) => {
-        const cb = callbackRegistry.get(res.callbackId!);
-        if (cb) {
-            const wrappedArgs = (res.args || []).map((arg: any) => createProxy(arg));
-            return cb(...wrappedArgs);
-        }
-        return null;
-    });
+    ipc = new IpcWorker(fdRead, fdWrite);
 
     // Preserve GJS's global print() — only patch if not already defined so we
     // don't clobber a pre-existing definition (e.g. from a test framework).
@@ -214,15 +211,93 @@ export function init() {
     initialize();
 }
 
-function drainEvents() {
+/**
+ * Manually release a proxy object immediately, without waiting for V8 GC.
+ * Useful when you know an object is no longer needed and want to free the
+ * GJS-side reference right away (e.g. a closed window's WebView).
+ */
+export function releaseObject(proxy: any): void {
+    const id = proxy?.__ref;
+    if (!id || !ipc) return;
+    try { ipc.send({ action: 'Release', targetId: id }); } catch {}
+    const cbs = objectCallbacks.get(id);
+    if (cbs) {
+        for (const cbId of cbs) callbackRegistry.delete(cbId);
+        objectCallbacks.delete(id);
+    }
+}
+
+/**
+ * Start the event-drain poll loop immediately, without waiting for
+ * Gio.Application.run() to be detected.
+ *
+ * Call this just before entering a GLib.MainLoop (or any blocking GTK loop)
+ * that was started without going through Gio.Application.run(), so that GJS
+ * signal callbacks are delivered to Node.js while the loop is running.
+ */
+export function startEventDrain(): void {
+    initialize();
+    startPolling();
+}
+
+/**
+ * Synchronously drain all pending GJS callback events that have already arrived
+ * from the Worker thread. Returns immediately if nothing is queued.
+ *
+ * Use this in a tight spin-loop when you need to process callbacks without
+ * yielding to the Node.js event loop — for example, while synchronously
+ * waiting for a modal GTK dialog to close.
+ *
+ * Example:
+ *   const sab = new SharedArrayBuffer(4);
+ *   const arr = new Int32Array(sab);
+ *   while (!done) {
+ *     drainCallbacks();
+ *     Atomics.wait(arr, 0, 0, 2); // sleep ~2 ms
+ *   }
+ */
+export function drainCallbacks(): void {
     if (!ipc) return;
-    // Release GC'd objects before draining callbacks — safe to do IPC here.
     if (releaseQueue.length > 0) {
         for (const id of releaseQueue.splice(0)) {
             try { ipc.send({ action: 'Release', targetId: id }); } catch {}
         }
     }
-    ipc.drainEvents();
+    try {
+        const res = ipc.send({ action: 'Poll' });
+        if (res && res.type === 'poll' && Array.isArray(res.events)) {
+            for (const ev of res.events) {
+                const cb = callbackRegistry.get(ev.callbackId);
+                if (cb) {
+                    const wrappedArgs = (ev.args || []).map((arg: any) => createProxy(arg));
+                    try { cb(...wrappedArgs); } catch(e) { console.error('[node-with-gjs] Callback error:', e); }
+                }
+            }
+        }
+    } catch { /* ignore if GJS exited */ }
+}
+
+function drainEvents() {
+    if (!ipc) return;
+    // Release GC'd objects first.
+    if (releaseQueue.length > 0) {
+        for (const id of releaseQueue.splice(0)) {
+            try { ipc.send({ action: 'Release', targetId: id }); } catch {}
+        }
+    }
+    // Poll GJS for any queued callback events.
+    try {
+        const res = ipc.send({ action: 'Poll' });
+        if (res && res.type === 'poll' && Array.isArray(res.events)) {
+            for (const ev of res.events) {
+                const cb = callbackRegistry.get(ev.callbackId);
+                if (cb) {
+                    const wrappedArgs = (ev.args || []).map((arg: any) => createProxy(arg));
+                    try { cb(...wrappedArgs); } catch(e) { console.error('[node-with-gjs] Callback error:', e); }
+                }
+            }
+        }
+    } catch { /* ignore if GJS exited */ }
 }
 
 function startPolling() {

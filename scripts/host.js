@@ -25,6 +25,8 @@ const dataIn = new Gio.DataInputStream({ base_stream: inStream });
 const dataOut = new Gio.DataOutputStream({ base_stream: outStream });
 
 const objectStore = new Map();
+// Queue of callback events waiting to be drained by a Poll command.
+const eventQueue = [];
 // Reverse map: GObject → id, for deduplication.
 // WeakMap so GObjects can still be GC'd by SpiderMonkey when no other refs exist.
 const objectToId = new WeakMap();
@@ -53,21 +55,6 @@ function ConvertToProtocol(obj) {
     return { type: 'ref', id: id };
 }
 
-// Used by signal callbacks and also inside nested IPC calls triggered by those callbacks.
-// GJS blocks here until Node.js sends a {type:'reply'} — commands interleaved by
-// the Node.js callback (e.g. label.set_label()) are executed before the reply arrives.
-function processNestedCommands() {
-    while (true) {
-        const [line] = dataIn.read_line_utf8(null);
-        if (!line) System.exit(0);
-        const cmd = JSON.parse(line);
-        if (cmd.type === 'reply') return cmd;
-        let response;
-        try { response = executeCommand(cmd); }
-        catch (e) { response = { type: 'error', message: e.toString() }; }
-        dataOut.put_string(JSON.stringify(response) + '\n', null);
-    }
-}
 
 function ResolveArg(arg) {
     if (arg.type === 'null') return null;
@@ -86,15 +73,11 @@ function ResolveArg(arg) {
     }
     if (arg.type === 'callback') {
         return (...cbArgs) => {
-            // Always use the synchronous round-trip so the return value reaches GTK.
-            // The Node.js Worker thread is always reading; it will forward this event
-            // and drainEvents() will reply within ~16 ms regardless of whether
-            // the main thread is currently inside a send() call or between polls.
+            // Enqueue the event; Node.js drains it via the Poll action.
+            // Returning immediately keeps the GLib main loop running so GTK
+            // events (button clicks, dialog responses, etc.) are processed.
             const mappedArgs = cbArgs.map(ConvertToProtocol);
-            const msg = { type: 'event', callbackId: arg.callbackId, args: mappedArgs };
-            dataOut.put_string(JSON.stringify(msg) + '\n', null);
-            const res = processNestedCommands();
-            if (res.result && res.result.type === 'primitive') return res.result.value;
+            eventQueue.push({ callbackId: arg.callbackId, args: mappedArgs });
             return null;
         };
     }
@@ -157,6 +140,10 @@ function executeCommand(cmd) {
     if (cmd.action === 'Print') {
         print(...cmd.args.map(a => ResolveArg(a)));
         return { type: 'void' };
+    }
+    if (cmd.action === 'Poll') {
+        const events = eventQueue.splice(0);
+        return { type: 'poll', events };
     }
     throw new Error(`Unknown Action ${cmd.action}`);
 }
