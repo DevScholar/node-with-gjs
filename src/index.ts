@@ -114,9 +114,12 @@ function initialize() {
         const cb = callbackRegistry.get(res.callbackId!);
         if (cb) {
             const wrappedArgs = (res.args || []).map((arg: any) => createProxy(arg));
-            return cb(...wrappedArgs);
+            const result = cb(...wrappedArgs);
+            // Wrap the return value as a protocol object so GJS's
+            // processNestedCommands() can reconstruct it (e.g. true for close-request).
+            return wrapArg(result);
         }
-        return null;
+        return { type: 'null' };
     });
 
     // Preserve GJS's global print() — only patch if not already defined so we
