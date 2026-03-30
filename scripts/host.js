@@ -145,6 +145,11 @@ function executeCommand(cmd) {
         const events = eventQueue.splice(0);
         return { type: 'poll', events };
     }
+    if (cmd.action === 'AppRelease') {
+        const app = objectStore.get(cmd.appId);
+        if (app) app.release();
+        return { type: 'void' };
+    }
     throw new Error(`Unknown Action ${cmd.action}`);
 }
 
@@ -176,7 +181,7 @@ function bindIPCEvent() {
                 let isGioApp = false;
                 try { isGioApp = target instanceof imports.gi.Gio.Application; } catch {}
                 if (isGioApp) {
-                    dataOut.put_string(JSON.stringify({ type: 'run_started' }) + '\n', null);
+                    dataOut.put_string(JSON.stringify({ type: 'run_started', appId: cmd.targetId }) + '\n', null);
                     const argsArray = (cmd.args || []).map(a => ResolveArg(a));
                     // Hold the app so it doesn't exit immediately after 'activate' returns
                     // with no windows.  In the polling model the Node.js-side activate

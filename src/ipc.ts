@@ -24,6 +24,9 @@ export class IpcWorker {
             workerData: { fdRead, port: port2 },
             transferList: [port2]
         });
+        // Unref so the worker doesn't prevent Node.js from exiting naturally
+        // (e.g. console scripts that finish without closing a GTK window).
+        this.worker.unref();
         this.worker.on('error', (e) =>
             console.error('[node-with-gjs] IPC worker error:', e)
         );

@@ -43,11 +43,19 @@ let initialized = false;
 let reqPath = '';
 let resPath = '';
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+// Ref'd timer that keeps Node.js alive while a GTK/Gio app is running.
+// Cleared when GJS exits so the event loop can drain and process.exit() runs.
+let appKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+// App object ID to release (via AppRelease IPC) after the first activate event
+// is delivered to Node.js.  Set when run_started is received, cleared after use.
+let pendingAppRelease: string | null = null;
 
 function cleanup() {
     if (!initialized) return;
     initialized = false;
 
+    if (appKeepAliveTimer) { clearInterval(appKeepAliveTimer); appKeepAliveTimer = null; }
+    pendingAppRelease = null;
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     if (ipc) try { ipc.close(); } catch {}
     if (proc && !proc.killed) try { proc.kill('SIGKILL'); } catch {}
@@ -175,7 +183,13 @@ function createProxy(meta: any): any {
                         // GJS detected this is Gio.Application.run() and entered the main loop.
                         // Start the drain loop so events are delivered during app lifetime.
                         if (res?.type === 'run_started') {
+                            pendingAppRelease = res.appId ?? null;
                             startPolling();
+                            // Keep the event loop alive while the GTK app runs.
+                            // Cleared in drainEvents() when GJS exits.
+                            if (!appKeepAliveTimer) {
+                                appKeepAliveTimer = setInterval(() => {}, 10_000);
+                            }
                             return undefined;
                         }
                         return createProxy(res);
@@ -286,9 +300,12 @@ function drainEvents() {
         }
     }
     // Poll GJS for any queued callback events.
+    let gjsExited = false;
     try {
         const res = ipc.send({ action: 'Poll' });
-        if (res && res.type === 'poll' && Array.isArray(res.events)) {
+        if (res?.type === 'exit') {
+            gjsExited = true;
+        } else if (res && res.type === 'poll' && Array.isArray(res.events)) {
             for (const ev of res.events) {
                 const cb = callbackRegistry.get(ev.callbackId);
                 if (cb) {
@@ -296,8 +313,21 @@ function drainEvents() {
                     try { cb(...wrappedArgs); } catch(e) { console.error('[node-with-gjs] Callback error:', e); }
                 }
             }
+            // Release the app hold AFTER delivering the first batch of events.
+            // By this point the activate callback has run and the first window
+            // has been created (IPC is synchronous), so the extra hold is no
+            // longer needed to prevent a premature GTK quit.
+            if (pendingAppRelease && res.events.length > 0) {
+                const appId = pendingAppRelease;
+                pendingAppRelease = null;
+                try { ipc.send({ action: 'AppRelease', appId }); } catch {}
+            }
         }
-    } catch { /* ignore if GJS exited */ }
+    } catch { gjsExited = true; }
+    if (gjsExited && appKeepAliveTimer) {
+        clearInterval(appKeepAliveTimer);
+        appKeepAliveTimer = null;
+    }
 }
 
 function startPolling() {
