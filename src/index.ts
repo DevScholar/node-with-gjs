@@ -43,19 +43,11 @@ let initialized = false;
 let reqPath = '';
 let resPath = '';
 let pollInterval: ReturnType<typeof setInterval> | null = null;
-// Ref'd timer that keeps Node.js alive while a GTK/Gio app is running.
-// Cleared when GJS exits so the event loop can drain and process.exit() runs.
-let appKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
-// App object ID to release (via AppRelease IPC) after the first activate event
-// is delivered to Node.js.  Set when run_started is received, cleared after use.
-let pendingAppRelease: string | null = null;
 
 function cleanup() {
     if (!initialized) return;
     initialized = false;
 
-    if (appKeepAliveTimer) { clearInterval(appKeepAliveTimer); appKeepAliveTimer = null; }
-    pendingAppRelease = null;
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     if (ipc) try { ipc.close(); } catch {}
     if (proc && !proc.killed) try { proc.kill('SIGKILL'); } catch {}
@@ -118,7 +110,14 @@ function initialize() {
     const fdWrite = fs.openSync(reqPath, 'w');
     const fdRead = fs.openSync(resPath, 'r');
 
-    ipc = new IpcWorker(fdRead, fdWrite);
+    ipc = new IpcWorker(fdRead, fdWrite, (res: any) => {
+        const cb = callbackRegistry.get(res.callbackId!);
+        if (cb) {
+            const wrappedArgs = (res.args || []).map((arg: any) => createProxy(arg));
+            return cb(...wrappedArgs);
+        }
+        return null;
+    });
 
     // Preserve GJS's global print() — only patch if not already defined so we
     // don't clobber a pre-existing definition (e.g. from a test framework).
@@ -146,7 +145,11 @@ function wrapArg(arg: any, ownerObjectId?: string): any {
             if (!objectCallbacks.has(ownerObjectId)) objectCallbacks.set(ownerObjectId, []);
             objectCallbacks.get(ownerObjectId)!.push(cbId);
         }
-        return { type: 'callback', callbackId: cbId };
+        // Async functions: enqueue event in GJS, drain via Poll from setInterval.
+        // Sync functions: GJS blocks in processNestedCommands until Node.js replies;
+        // the return value reaches GTK (e.g. close-request → true, draw-func calls).
+        const isAsync = arg.constructor?.name === 'AsyncFunction';
+        return { type: 'callback', callbackId: cbId, async: isAsync };
     }
 
     if (Array.isArray(arg)) return { type: 'array', value: arg.map(a => wrapArg(a, ownerObjectId)) };
@@ -181,15 +184,9 @@ function createProxy(meta: any): any {
                         const netArgs = args.map(a => wrapArg(a, id));
                         const res = ipc!.send({ action: 'Invoke', targetId: id, methodName: prop, args: netArgs });
                         // GJS detected this is Gio.Application.run() and entered the main loop.
-                        // Start the drain loop so events are delivered during app lifetime.
+                        // Start the drain loop so async events and GC releases are processed.
                         if (res?.type === 'run_started') {
-                            pendingAppRelease = res.appId ?? null;
                             startPolling();
-                            // Keep the event loop alive while the GTK app runs.
-                            // Cleared in drainEvents() when GJS exits.
-                            if (!appKeepAliveTimer) {
-                                appKeepAliveTimer = setInterval(() => {}, 10_000);
-                            }
                             return undefined;
                         }
                         return createProxy(res);
@@ -255,28 +252,23 @@ export function startEventDrain(): void {
 }
 
 /**
- * Synchronously drain all pending GJS callback events that have already arrived
- * from the Worker thread. Returns immediately if nothing is queued.
+ * Synchronously drain all pending GJS events (both sync and async).
+ * Returns immediately if nothing is queued.
  *
  * Use this in a tight spin-loop when you need to process callbacks without
- * yielding to the Node.js event loop — for example, while synchronously
- * waiting for a modal GTK dialog to close.
- *
- * Example:
- *   const sab = new SharedArrayBuffer(4);
- *   const arr = new Int32Array(sab);
- *   while (!done) {
- *     drainCallbacks();
- *     Atomics.wait(arr, 0, 0, 2); // sleep ~2 ms
- *   }
+ * yielding to the Node.js event loop.
  */
 export function drainCallbacks(): void {
     if (!ipc) return;
+    // Release GC'd objects.
     if (releaseQueue.length > 0) {
         for (const id of releaseQueue.splice(0)) {
             try { ipc.send({ action: 'Release', targetId: id }); } catch {}
         }
     }
+    // Drain pending sync events from the port.
+    ipc.drainEvents();
+    // Drain async events from GJS eventQueue.
     try {
         const res = ipc.send({ action: 'Poll' });
         if (res && res.type === 'poll' && Array.isArray(res.events)) {
@@ -299,12 +291,18 @@ function drainEvents() {
             try { ipc.send({ action: 'Release', targetId: id }); } catch {}
         }
     }
-    // Poll GJS for any queued callback events.
-    let gjsExited = false;
+    // Drain pending sync events from the port (button clicks, draw-func, etc.)
+    ipc.drainEvents();
+    // Check if GJS has exited (detected by the worker getting EOF).
+    if (ipc.isExited) {
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+        return;
+    }
+    // Drain async callback events from GJS's eventQueue via Poll.
     try {
         const res = ipc.send({ action: 'Poll' });
         if (res?.type === 'exit') {
-            gjsExited = true;
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
         } else if (res && res.type === 'poll' && Array.isArray(res.events)) {
             for (const ev of res.events) {
                 const cb = callbackRegistry.get(ev.callbackId);
@@ -313,21 +311,8 @@ function drainEvents() {
                     try { cb(...wrappedArgs); } catch(e) { console.error('[node-with-gjs] Callback error:', e); }
                 }
             }
-            // Release the app hold AFTER delivering the first batch of events.
-            // By this point the activate callback has run and the first window
-            // has been created (IPC is synchronous), so the extra hold is no
-            // longer needed to prevent a premature GTK quit.
-            if (pendingAppRelease && res.events.length > 0) {
-                const appId = pendingAppRelease;
-                pendingAppRelease = null;
-                try { ipc.send({ action: 'AppRelease', appId }); } catch {}
-            }
         }
-    } catch { gjsExited = true; }
-    if (gjsExited && appKeepAliveTimer) {
-        clearInterval(appKeepAliveTimer);
-        appKeepAliveTimer = null;
-    }
+    } catch { /* ignore if GJS exited */ }
 }
 
 function startPolling() {

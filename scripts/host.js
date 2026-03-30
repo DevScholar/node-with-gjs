@@ -25,7 +25,7 @@ const dataIn = new Gio.DataInputStream({ base_stream: inStream });
 const dataOut = new Gio.DataOutputStream({ base_stream: outStream });
 
 const objectStore = new Map();
-// Queue of callback events waiting to be drained by a Poll command.
+// Queue of async callback events waiting to be drained by a Poll command.
 const eventQueue = [];
 // Reverse map: GObject → id, for deduplication.
 // WeakMap so GObjects can still be GC'd by SpiderMonkey when no other refs exist.
@@ -55,6 +55,22 @@ function ConvertToProtocol(obj) {
     return { type: 'ref', id: id };
 }
 
+// Used by sync signal callbacks and by nested IPC calls triggered from callbacks.
+// GJS blocks here until Node.js sends a {type:'reply'} — commands interleaved by
+// the Node.js callback (e.g. label.set_label()) are executed before the reply arrives.
+function processNestedCommands() {
+    while (true) {
+        const [line] = dataIn.read_line_utf8(null);
+        if (!line) System.exit(0);
+        const cmd = JSON.parse(line);
+        if (cmd.type === 'reply') return cmd;
+        let response;
+        try { response = executeCommand(cmd); }
+        catch (e) { response = { type: 'error', message: e.toString() }; }
+        if (cmd._seq !== undefined) response._seq = cmd._seq;
+        dataOut.put_string(JSON.stringify(response) + '\n', null);
+    }
+}
 
 function ResolveArg(arg) {
     if (arg.type === 'null') return null;
@@ -72,14 +88,27 @@ function ResolveArg(arg) {
         return obj;
     }
     if (arg.type === 'callback') {
-        return (...cbArgs) => {
-            // Enqueue the event; Node.js drains it via the Poll action.
-            // Returning immediately keeps the GLib main loop running so GTK
-            // events (button clicks, dialog responses, etc.) are processed.
-            const mappedArgs = cbArgs.map(ConvertToProtocol);
-            eventQueue.push({ callbackId: arg.callbackId, args: mappedArgs });
-            return null;
-        };
+        if (arg.async) {
+            // Async callback: enqueue to eventQueue, Node.js drains via Poll.
+            // Return immediately so GJS doesn't block.
+            return (...cbArgs) => {
+                const mappedArgs = cbArgs.map(ConvertToProtocol);
+                eventQueue.push({ callbackId: arg.callbackId, args: mappedArgs });
+                return null;
+            };
+        } else {
+            // Sync callback: send event to Node.js and block until reply.
+            // This ensures the return value reaches GTK (e.g. close-request → true/false)
+            // and that Cairo contexts remain valid during set_draw_func callbacks.
+            return (...cbArgs) => {
+                const mappedArgs = cbArgs.map(ConvertToProtocol);
+                const msg = { type: 'event', callbackId: arg.callbackId, args: mappedArgs };
+                dataOut.put_string(JSON.stringify(msg) + '\n', null);
+                const res = processNestedCommands();
+                if (res.result && res.result.type === 'primitive') return res.result.value;
+                return null;
+            };
+        }
     }
 }
 
@@ -145,11 +174,6 @@ function executeCommand(cmd) {
         const events = eventQueue.splice(0);
         return { type: 'poll', events };
     }
-    if (cmd.action === 'AppRelease') {
-        const app = objectStore.get(cmd.appId);
-        if (app) app.release();
-        return { type: 'void' };
-    }
     throw new Error(`Unknown Action ${cmd.action}`);
 }
 
@@ -172,36 +196,25 @@ function bindIPCEvent() {
             // Detect Gio.Application.run() by actual runtime type — no heuristics.
             // Pre-send {type:'run_started'} so Node.js unblocks immediately,
             // then enter the blocking GTK main loop. The GLib event loop inside
-            // app.run() continues to fire io_add_watch, so signal-callback IPC
-            // (processNestedCommands) keeps working while the app is running.
-            // Returning SOURCE_CONTINUE without a second dataOut.put_string avoids
-            // sending a spurious extra response — no sentinel needed.
+            // app.run() continues to fire io_add_watch, so async-callback Poll
+            // commands from Node.js keep working while the app is running.
+            // Sync callbacks bypass io_add_watch entirely via processNestedCommands,
+            // so calling target.run() directly here does not deadlock.
             if (cmd.action === 'Invoke' && cmd.methodName === 'run') {
                 const target = objectStore.get(cmd.targetId);
                 let isGioApp = false;
                 try { isGioApp = target instanceof imports.gi.Gio.Application; } catch {}
                 if (isGioApp) {
-                    dataOut.put_string(JSON.stringify({ type: 'run_started', appId: cmd.targetId }) + '\n', null);
+                    dataOut.put_string(JSON.stringify({ type: 'run_started', _seq: cmd._seq }) + '\n', null);
                     const argsArray = (cmd.args || []).map(a => ResolveArg(a));
-                    // Hold the app so it doesn't exit immediately after 'activate' returns
-                    // with no windows.  In the polling model the Node.js-side activate
-                    // callback runs ~16 ms later (first Poll); without this hold, GTK4
-                    // detects no windows at activate-return time, decrements use_count to 0,
-                    // and calls g_application_quit() before the window is created.
-                    // app.quit() (called from close-request) uses g_main_loop_quit() directly
-                    // and exits cleanly regardless of this extra hold.
-                    target.hold();
-                    // Schedule target.run() via idle_add instead of calling it directly here.
-                    // GLib sources have can_recurse=false by default: while this io_add_watch
-                    // callback is on the stack, the same source cannot be re-dispatched.
-                    // Calling target.run() directly would block this callback indefinitely,
-                    // so Poll commands from Node.js could never trigger the io_add_watch again
-                    // → deadlock.  An idle_add creates a separate source, allowing the
-                    // io_add_watch to fire freely inside target.run()'s nested GTK main loop.
+                    // Schedule target.run() via idle_add so io_add_watch returns first.
+                    // This ensures 'activate' fires in the GLib main loop context, not
+                    // inside io_add_watch's call stack. That way, when Node.js's
+                    // drainEvents() picks up the 'activate' event, ipc.send() is not
+                    // reentrant (we're not already inside waitResponse() for a Poll).
                     GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
                         target.run(argsArray[0] || []);
-                        // app.run() returned — all windows closed.
-                        // Quit the GLib main loop so the GJS process exits.
+                        // app.run() returned — all windows closed. Quit the outer loop.
                         mainLoop.quit();
                         return GLib.SOURCE_REMOVE;
                     });
@@ -213,6 +226,7 @@ function bindIPCEvent() {
             try { response = executeCommand(cmd); }
             catch (e) { response = { type: 'error', message: e.toString() }; }
 
+            if (cmd._seq !== undefined) response._seq = cmd._seq;
             dataOut.put_string(JSON.stringify(response) + '\n', null);
         } catch (e) {
             System.exit(0);

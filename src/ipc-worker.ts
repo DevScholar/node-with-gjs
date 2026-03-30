@@ -46,7 +46,7 @@ while (true) {
     } catch {
         continue; // skip malformed JSON
     }
-    // All messages from GJS are responses to commands sent by the main thread.
-    // The event-push model has been replaced by the Poll action.
-    port.postMessage({ kind: 'response', data: msg });
+    // 'event' = GJS-initiated sync callback (needs a reply before GJS continues)
+    // everything else = response to a command sent by the main thread
+    port.postMessage({ kind: msg.type === 'event' ? 'event' : 'response', data: msg });
 }
