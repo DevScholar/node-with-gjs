@@ -30,9 +30,10 @@ export class IpcWorker {
             workerData: { fdRead, port: port2 },
             transferList: [port2]
         });
-        // Do NOT unref() — the worker keeps the Node.js event loop alive while
-        // GJS is running. When GJS exits, the worker gets EOF and terminates,
-        // at which point Node.js exits naturally (no timers or handles left).
+        // Start unref'd so console scripts (no app.run()) exit naturally when done.
+        // refForApp() re-refs the worker when a Gio.Application.run() is detected,
+        // keeping Node.js alive until GJS exits and the worker gets EOF.
+        this.worker.unref();
         this.worker.on('error', (e) =>
             console.error('[node-with-gjs] IPC worker error:', e)
         );
@@ -125,6 +126,10 @@ export class IpcWorker {
             // unexpected 'response' messages between commands are harmless; ignore
         }
     }
+
+    /** Re-ref the worker when a Gio.Application.run() is detected, so Node.js
+     *  stays alive until GJS exits and the worker receives EOF. */
+    refForApp() { this.worker.ref(); }
 
     get isExited(): boolean { return this.exited; }
 

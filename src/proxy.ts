@@ -21,6 +21,7 @@ export function makeFnProxy(parentId: string, methodName: string, fnId?: string)
             const netArgs = args.map(a => wrapArg(a, parentId));
             const res = getIpc()!.send({ action: 'Invoke', targetId: parentId, methodName, args: netArgs });
             if (res?.type === 'run_started') {
+                getIpc()!.refForApp();
                 startPolling();
                 return undefined;
             }
