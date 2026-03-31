@@ -140,7 +140,20 @@ function executeCommand(cmd) {
         const target = objectStore.get(cmd.targetId);
         let val;
         try { val = target[cmd.property]; } catch(e) { return { type: 'null' }; }
-        if (typeof val === 'function') return { type: 'function' };
+        if (typeof val === 'function') {
+            // Store function in objectStore so Node.js can access static
+            // properties/methods (e.g. Gdk.Display.get_default()).
+            if (objectToId.has(val)) {
+                const existingId = objectToId.get(val);
+                if (objectStore.has(existingId)) {
+                    return { type: 'function', id: existingId };
+                }
+            }
+            const fnId = `gobj_${nextObjectId++}`;
+            objectStore.set(fnId, val);
+            objectToId.set(val, fnId);
+            return { type: 'function', id: fnId };
+        }
         return ConvertToProtocol(val);
     }
     if (cmd.action === 'Invoke') {

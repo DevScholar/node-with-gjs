@@ -23,9 +23,18 @@ const objectCallbacks = new Map<string, string[]>();
 // Ids of GJS objects whose Node.js proxies have been GC'd; drained in drainEvents().
 const releaseQueue: string[] = [];
 
+// ── Proxy cache (WeakRef) ────────────────────────────────────────────────────
+// GJS deduplicates objects: the same GObject returned by multiple calls gets
+// the same id.  Without a cache, each createProxy() call registers a separate
+// FinalizationRegistry entry.  When ANY of those proxies is GC'd the id is
+// released from GJS's objectStore — even though other proxies still reference
+// it.  The WeakRef cache ensures there is at most ONE proxy per id.
+const proxyCache = new Map<string, WeakRef<any>>();
+
 // FinalizationRegistry: only do in-process work here (push to queue).
 // Actual IPC happens later in drainEvents() where ipc is known to be alive.
 const gcRegistry = new FinalizationRegistry((id: string) => {
+    proxyCache.delete(id);
     releaseQueue.push(id);
     const cbs = objectCallbacks.get(id);
     if (cbs) {
@@ -166,12 +175,51 @@ function wrapArg(arg: any, ownerObjectId?: string): any {
     return { type: 'primitive', value: arg };
 }
 
+// Create a proxy for a GJS function that supports both calling (as a method on
+// its parent) and static property access (via the function's own ref id).
+// parentId + methodName → Invoke/NewProp;  fnId → Get for sub-properties.
+function makeFnProxy(parentId: string, methodName: string, fnId?: string): any {
+    return new Proxy(function() {}, {
+        get: fnId ? (_t: any, subProp: string | symbol) => {
+            if (subProp === '__ref') return fnId;
+            if (typeof subProp !== 'string') return undefined;
+            const subVal = ipc!.send({ action: 'Get', targetId: fnId, property: subProp });
+            if (subVal && subVal.type === 'function') {
+                return makeFnProxy(fnId, subProp, subVal.id);
+            }
+            return createProxy(subVal);
+        } : undefined,
+        apply: (_t: any, _thisArg: any, args: any[]) => {
+            const netArgs = args.map(a => wrapArg(a, parentId));
+            const res = ipc!.send({ action: 'Invoke', targetId: parentId, methodName, args: netArgs });
+            if (res?.type === 'run_started') {
+                startPolling();
+                return undefined;
+            }
+            return createProxy(res);
+        },
+        construct: (_t: any, args: any[]) => {
+            const netArgs = args.map(a => wrapArg(a, parentId));
+            const res = ipc!.send({ action: 'NewProp', targetId: parentId, property: methodName, args: netArgs });
+            return createProxy(res);
+        }
+    });
+}
+
 function createProxy(meta: any): any {
     if (meta.type === 'primitive' || meta.type === 'null') return meta.value;
     if (meta.type === 'array') return meta.value.map((item: any) => createProxy(item));
     if (meta.type !== 'ref') return undefined;
 
     const id = meta.id!;
+
+    // Return the existing live proxy for this id (prevents duplicate-release on GC)
+    const cached = proxyCache.get(id);
+    if (cached) {
+        const existing = cached.deref();
+        if (existing) return existing;
+    }
+
     const stub = function() {};
 
     const proxy = new Proxy(stub, {
@@ -182,24 +230,7 @@ function createProxy(meta: any): any {
             const val = ipc!.send({ action: 'Get', targetId: id, property: prop });
 
             if (val && val.type === 'function') {
-                return new Proxy(function() {}, {
-                    apply: (t, thisArg, args) => {
-                        const netArgs = args.map(a => wrapArg(a, id));
-                        const res = ipc!.send({ action: 'Invoke', targetId: id, methodName: prop, args: netArgs });
-                        // GJS detected this is Gio.Application.run() and entered the main loop.
-                        // Start the drain loop so async events and GC releases are processed.
-                        if (res?.type === 'run_started') {
-                            startPolling();
-                            return undefined;
-                        }
-                        return createProxy(res);
-                    },
-                    construct: (t, args) => {
-                        const netArgs = args.map(a => wrapArg(a, id));
-                        const res = ipc!.send({ action: 'NewProp', targetId: id, property: prop, args: netArgs });
-                        return createProxy(res);
-                    }
-                });
+                return makeFnProxy(id, prop, val.id);
             }
             return createProxy(val);
         },
@@ -217,6 +248,7 @@ function createProxy(meta: any): any {
         }
     });
 
+    proxyCache.set(id, new WeakRef(proxy));
     gcRegistry.register(proxy, id);
     return proxy;
 }
@@ -233,6 +265,7 @@ export function init() {
 export function releaseObject(proxy: any): void {
     const id = proxy?.__ref;
     if (!id || !ipc) return;
+    proxyCache.delete(id);
     try { ipc.send({ action: 'Release', targetId: id }); } catch {}
     const cbs = objectCallbacks.get(id);
     if (cbs) {
