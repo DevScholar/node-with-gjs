@@ -66,12 +66,20 @@ export function initialize() {
 
     function sq(s: string): string { return `'${s.replace(/'/g, "'\\''")}'`; }
 
+    const spawnEnv = { ...process.env };
+    try {
+        const vendor = fs.readFileSync('/sys/class/dmi/id/sys_vendor', 'utf-8').trim();
+        if (vendor === 'VMware, Inc.') {
+            spawnEnv['WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS'] = '1';
+        }
+    } catch { /* not available outside Linux/bare-metal; ignore */ }
+
     const proc = cp.spawn('bash', [
         '-c',
         `exec ${sq(gjsPath)} -m ${sq(scriptPath)} 3<${sq(reqPath)} 4>${sq(resPath)}`
     ], {
         stdio: 'inherit',
-        env: process.env
+        env: spawnEnv
     });
 
     setProc(proc);
