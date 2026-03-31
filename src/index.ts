@@ -1,257 +1,10 @@
 // src/index.ts
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import * as cp from 'node:child_process';
-import * as os from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { IpcWorker } from './ipc.js';
+import { initialize } from './lifecycle.js';
+import { startPolling } from './poll.js';
+import { createProxy } from './proxy.js';
+import { getIpc, callbackRegistry, objectCallbacks, proxyCache, releaseQueue, namespaceCache, giVersions } from './state.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Delay between event-drain polls while the GTK main loop is running.
-const POLL_INTERVAL_MS = 16;
-
-/**
- * Registry of all active callbacks registered from Node.js.
- * Exported so host packages (e.g. node-with-window) can register callbacks
- * that aren't tied to a specific proxy object lifetime (e.g. menu actions).
- */
-export const callbackRegistry = new Map<string, Function>();
-// Maps GJS object id → callback ids registered on its behalf (for bulk cleanup).
-const objectCallbacks = new Map<string, string[]>();
-// Ids of GJS objects whose Node.js proxies have been GC'd; drained in drainEvents().
-const releaseQueue: string[] = [];
-
-// ── Proxy cache (WeakRef) ────────────────────────────────────────────────────
-// GJS deduplicates objects: the same GObject returned by multiple calls gets
-// the same id.  Without a cache, each createProxy() call registers a separate
-// FinalizationRegistry entry.  When ANY of those proxies is GC'd the id is
-// released from GJS's objectStore — even though other proxies still reference
-// it.  The WeakRef cache ensures there is at most ONE proxy per id.
-const proxyCache = new Map<string, WeakRef<any>>();
-
-// FinalizationRegistry: only do in-process work here (push to queue).
-// Actual IPC happens later in drainEvents() where ipc is known to be alive.
-const gcRegistry = new FinalizationRegistry((id: string) => {
-    proxyCache.delete(id);
-    releaseQueue.push(id);
-    const cbs = objectCallbacks.get(id);
-    if (cbs) {
-        for (const cbId of cbs) callbackRegistry.delete(cbId);
-        objectCallbacks.delete(id);
-    }
-});
-
-const namespaceCache = new Map<string, any>();
-const giVersions: Record<string, string> = {};
-
-let ipc: IpcWorker | null = null;
-let proc: cp.ChildProcess | null = null;
-let initialized = false;
-let reqPath = '';
-let resPath = '';
-let pollInterval: ReturnType<typeof setInterval> | null = null;
-
-function cleanup() {
-    if (!initialized) return;
-    initialized = false;
-
-    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-    if (ipc) try { ipc.close(); } catch {}
-    if (proc && !proc.killed) try { proc.kill('SIGKILL'); } catch {}
-    if (fs.existsSync(reqPath)) try { fs.unlinkSync(reqPath); } catch {}
-    if (fs.existsSync(resPath)) try { fs.unlinkSync(resPath); } catch {}
-
-    proc = null;
-    ipc = null;
-}
-
-function findGjsPath(): string {
-    try {
-        const result = cp.execSync('which gjs', { encoding: 'utf-8' }).trim();
-        return result || 'gjs';
-    } catch {
-        return 'gjs';
-    }
-}
-
-function initialize() {
-    if (initialized) return;
-
-    const token = `${process.pid}-${Date.now()}`;
-    reqPath = path.join(os.tmpdir(), `gjs-req-${token}.pipe`);
-    resPath = path.join(os.tmpdir(), `gjs-res-${token}.pipe`);
-
-    try {
-        cp.execSync(`mkfifo "${reqPath}"`);
-        cp.execSync(`mkfifo "${resPath}"`);
-    } catch(e) {
-        console.error("Failed to create Unix FIFOs");
-        process.exit(1);
-    }
-
-    const scriptPath = path.join(__dirname, '..', 'scripts', 'host.js');
-    const gjsPath = findGjsPath();
-
-    function sq(s: string): string { return `'${s.replace(/'/g, "'\\''")}'`; }
-
-    proc = cp.spawn('bash', [
-        '-c',
-        `exec ${sq(gjsPath)} -m ${sq(scriptPath)} 3<${sq(reqPath)} 4>${sq(resPath)}`
-    ], {
-        stdio: 'inherit',
-        env: process.env
-    });
-
-    proc.unref();
-
-    process.on('beforeExit', () => { cleanup(); process.exit(0); });
-    process.on('exit', cleanup);
-    process.on('SIGINT', () => { cleanup(); process.exit(0); });
-    process.on('SIGTERM', () => { cleanup(); process.exit(0); });
-    process.on('uncaughtException', (err) => {
-        console.error('Node.js Exception:', err);
-        cleanup();
-        process.exit(1);
-    });
-
-    const fdWrite = fs.openSync(reqPath, 'w');
-    const fdRead = fs.openSync(resPath, 'r');
-
-    ipc = new IpcWorker(fdRead, fdWrite, (res: any) => {
-        const cb = callbackRegistry.get(res.callbackId!);
-        if (cb) {
-            const wrappedArgs = (res.args || []).map((arg: any) => createProxy(arg));
-            const result = cb(...wrappedArgs);
-            // Wrap the return value as a protocol object so GJS's
-            // processNestedCommands() can reconstruct it (e.g. true for close-request).
-            return wrapArg(result);
-        }
-        return { type: 'null' };
-    });
-
-    // Preserve GJS's global print() — only patch if not already defined so we
-    // don't clobber a pre-existing definition (e.g. from a test framework).
-    if (!(globalThis as any).print) {
-        (globalThis as any).print = (...args: any[]) => {
-            ipc!.send({ action: 'Print', args: args.map(arg => wrapArg(arg)) });
-        };
-    }
-
-    initialized = true;
-}
-
-function wrapArg(arg: any, ownerObjectId?: string): any {
-    if (arg === null || arg === undefined) return { type: 'null' };
-    if (arg.__ref) return { type: 'ref', id: arg.__ref };
-
-    if (arg instanceof Uint8Array) {
-        return { type: 'uint8array', value: Array.from(arg) };
-    }
-
-    if (typeof arg === 'function') {
-        const cbId = `cb_${Date.now()}_${Math.random()}`;
-        callbackRegistry.set(cbId, arg);
-        if (ownerObjectId) {
-            if (!objectCallbacks.has(ownerObjectId)) objectCallbacks.set(ownerObjectId, []);
-            objectCallbacks.get(ownerObjectId)!.push(cbId);
-        }
-        // Async functions: enqueue event in GJS, drain via Poll from setInterval.
-        // Sync functions: GJS blocks in processNestedCommands until Node.js replies;
-        // the return value reaches GTK (e.g. close-request → true, draw-func calls).
-        const isAsync = arg.constructor?.name === 'AsyncFunction';
-        return { type: 'callback', callbackId: cbId, async: isAsync };
-    }
-
-    if (Array.isArray(arg)) return { type: 'array', value: arg.map(a => wrapArg(a, ownerObjectId)) };
-
-    if (typeof arg === 'object') {
-        const plainObj: any = {};
-        for (let k in arg) plainObj[k] = wrapArg(arg[k], ownerObjectId);
-        return { type: 'object', value: plainObj };
-    }
-
-    return { type: 'primitive', value: arg };
-}
-
-// Create a proxy for a GJS function that supports both calling (as a method on
-// its parent) and static property access (via the function's own ref id).
-// parentId + methodName → Invoke/NewProp;  fnId → Get for sub-properties.
-function makeFnProxy(parentId: string, methodName: string, fnId?: string): any {
-    return new Proxy(function() {}, {
-        get: fnId ? (_t: any, subProp: string | symbol) => {
-            if (subProp === '__ref') return fnId;
-            if (typeof subProp !== 'string') return undefined;
-            const subVal = ipc!.send({ action: 'Get', targetId: fnId, property: subProp });
-            if (subVal && subVal.type === 'function') {
-                return makeFnProxy(fnId, subProp, subVal.id);
-            }
-            return createProxy(subVal);
-        } : undefined,
-        apply: (_t: any, _thisArg: any, args: any[]) => {
-            const netArgs = args.map(a => wrapArg(a, parentId));
-            const res = ipc!.send({ action: 'Invoke', targetId: parentId, methodName, args: netArgs });
-            if (res?.type === 'run_started') {
-                startPolling();
-                return undefined;
-            }
-            return createProxy(res);
-        },
-        construct: (_t: any, args: any[]) => {
-            const netArgs = args.map(a => wrapArg(a, parentId));
-            const res = ipc!.send({ action: 'NewProp', targetId: parentId, property: methodName, args: netArgs });
-            return createProxy(res);
-        }
-    });
-}
-
-function createProxy(meta: any): any {
-    if (meta.type === 'primitive' || meta.type === 'null') return meta.value;
-    if (meta.type === 'array') return meta.value.map((item: any) => createProxy(item));
-    if (meta.type !== 'ref') return undefined;
-
-    const id = meta.id!;
-
-    // Return the existing live proxy for this id (prevents duplicate-release on GC)
-    const cached = proxyCache.get(id);
-    if (cached) {
-        const existing = cached.deref();
-        if (existing) return existing;
-    }
-
-    const stub = function() {};
-
-    const proxy = new Proxy(stub, {
-        get: (target: any, prop: string | symbol) => {
-            if (prop === '__ref') return id;
-            if (typeof prop !== 'string') return undefined;
-
-            const val = ipc!.send({ action: 'Get', targetId: id, property: prop });
-
-            if (val && val.type === 'function') {
-                return makeFnProxy(id, prop, val.id);
-            }
-            return createProxy(val);
-        },
-
-        set: (target: any, prop: string | symbol, value: any) => {
-            if (typeof prop !== 'string') return false;
-            ipc!.send({ action: 'Set', targetId: id, property: prop, value: wrapArg(value, id) });
-            return true;
-        },
-
-        construct: (target: any, args: any[]) => {
-            const netArgs = args.map(a => wrapArg(a, id));
-            const res = ipc!.send({ action: 'New', typeId: id, args: netArgs });
-            return createProxy(res);
-        }
-    });
-
-    proxyCache.set(id, new WeakRef(proxy));
-    gcRegistry.register(proxy, id);
-    return proxy;
-}
+export { callbackRegistry } from './state.js';
 
 export function init() {
     initialize();
@@ -264,9 +17,9 @@ export function init() {
  */
 export function releaseObject(proxy: any): void {
     const id = proxy?.__ref;
-    if (!id || !ipc) return;
+    if (!id || !getIpc()) return;
     proxyCache.delete(id);
-    try { ipc.send({ action: 'Release', targetId: id }); } catch {}
+    try { getIpc()!.send({ action: 'Release', targetId: id }); } catch {}
     const cbs = objectCallbacks.get(id);
     if (cbs) {
         for (const cbId of cbs) callbackRegistry.delete(cbId);
@@ -295,6 +48,7 @@ export function startEventDrain(): void {
  * yielding to the Node.js event loop.
  */
 export function drainCallbacks(): void {
+    const ipc = getIpc();
     if (!ipc) return;
     // Release GC'd objects.
     if (releaseQueue.length > 0) {
@@ -319,44 +73,6 @@ export function drainCallbacks(): void {
     } catch { /* ignore if GJS exited */ }
 }
 
-function drainEvents() {
-    if (!ipc) return;
-    // Release GC'd objects first.
-    if (releaseQueue.length > 0) {
-        for (const id of releaseQueue.splice(0)) {
-            try { ipc.send({ action: 'Release', targetId: id }); } catch {}
-        }
-    }
-    // Drain pending sync events from the port (button clicks, draw-func, etc.)
-    ipc.drainEvents();
-    // Check if GJS has exited (detected by the worker getting EOF).
-    if (ipc.isExited) {
-        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-        return;
-    }
-    // Drain async callback events from GJS's eventQueue via Poll.
-    try {
-        const res = ipc.send({ action: 'Poll' });
-        if (res?.type === 'exit') {
-            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-        } else if (res && res.type === 'poll' && Array.isArray(res.events)) {
-            for (const ev of res.events) {
-                const cb = callbackRegistry.get(ev.callbackId);
-                if (cb) {
-                    const wrappedArgs = (ev.args || []).map((arg: any) => createProxy(arg));
-                    try { cb(...wrappedArgs); } catch(e) { console.error('[node-with-gjs] Callback error:', e); }
-                }
-            }
-        }
-    } catch { /* ignore if GJS exited */ }
-}
-
-function startPolling() {
-    if (pollInterval) return;
-    pollInterval = setInterval(drainEvents, POLL_INTERVAL_MS);
-    (pollInterval as any).unref?.();
-}
-
 export const imports = {
     gi: new Proxy({} as any, {
         get(_, namespace: string) {
@@ -373,7 +89,7 @@ export const imports = {
             const cacheKey = `${namespace}@${version || 'default'}`;
             if (!namespaceCache.has(cacheKey)) {
                 initialize();
-                const res = ipc!.send({ action: 'LoadNamespace', namespace, version });
+                const res = getIpc()!.send({ action: 'LoadNamespace', namespace, version });
                 namespaceCache.set(cacheKey, createProxy(res));
             }
             return namespaceCache.get(cacheKey);
