@@ -37,8 +37,8 @@ export function cleanup() {
 
 function findGjsPath(): string {
     try {
-        const result = cp.execSync('which gjs', { encoding: 'utf-8' }).trim();
-        return result || 'gjs';
+        // execFileSync runs 'which' directly, no shell involved.
+        return cp.execFileSync('which', ['gjs'], { encoding: 'utf-8' }).trim() || 'gjs';
     } catch {
         return 'gjs';
     }
@@ -53,18 +53,16 @@ export function initialize() {
     setReqPath(reqPath);
     setResPath(resPath);
 
+    // execFileSync runs mkfifo directly without a shell.
     try {
-        cp.execSync(`mkfifo "${reqPath}"`);
-        cp.execSync(`mkfifo "${resPath}"`);
-    } catch(e) {
-        console.error("Failed to create Unix FIFOs");
+        cp.execFileSync('mkfifo', [reqPath, resPath]);
+    } catch {
+        console.error('Failed to create Unix FIFOs');
         process.exit(1);
     }
 
     const scriptPath = path.join(__dirname, '..', 'scripts', 'host.js');
     const gjsPath = findGjsPath();
-
-    function sq(s: string): string { return `'${s.replace(/'/g, "'\\''")}'`; }
 
     const spawnEnv = { ...process.env };
     try {
@@ -74,13 +72,46 @@ export function initialize() {
         }
     } catch { /* not available outside Linux/bare-metal; ignore */ }
 
-    const proc = cp.spawn('bash', [
-        '-c',
-        `exec ${sq(gjsPath)} -m ${sq(scriptPath)} 3<${sq(reqPath)} 4>${sq(resPath)}`
-    ], {
-        stdio: 'inherit',
+    // Open both FIFOs with correct direction and without deadlocking.
+    //
+    // A FIFO open(O_RDONLY) blocks until a writer opens, and open(O_WRONLY)
+    // blocks until a reader opens.  To avoid deadlocking synchronously:
+    //
+    //   1. open(O_RDONLY | O_NONBLOCK) — returns immediately without a writer.
+    //   2. open(O_WRONLY)              — succeeds because step 1 is a reader.
+    //   3. open(O_RDONLY)              — succeeds because step 2 is a writer.
+    //      This creates a fresh open file description: blocking, no O_NONBLOCK.
+    //   4. close the O_NONBLOCK fd from step 1 (it was only needed to unblock step 2).
+    //
+    // reqPath: Node writes commands  → GJS reads  (child fd 3)
+    // resPath: GJS  writes responses → Node reads (child fd 4)
+
+    const O_RDONLY_NB = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
+
+    const fdReqTmp   = fs.openSync(reqPath, O_RDONLY_NB); // step 1
+    const fdReqWrite = fs.openSync(reqPath, 'w');          // step 2 — Node writes here
+    const fdReqRead  = fs.openSync(reqPath, 'r');          // step 3 — GJS reads here (blocking)
+    fs.closeSync(fdReqTmp);                                 // step 4
+
+    const fdResTmp   = fs.openSync(resPath, O_RDONLY_NB); // step 1
+    const fdResWrite = fs.openSync(resPath, 'w');          // step 2 — GJS writes here
+    const fdResRead  = fs.openSync(resPath, 'r');          // step 3 — Node reads here (blocking)
+    fs.closeSync(fdResTmp);                                 // step 4
+
+    // Spawn GJS directly, passing fds as integers per the Node.js docs.
+    // Node.js calls dup2(fdReqRead, 3) and dup2(fdResWrite, 4) in the child.
+    const proc = cp.spawn(gjsPath, ['-m', scriptPath], {
+        stdio: ['inherit', 'inherit', 'inherit', fdReqRead, fdResWrite],
         env: spawnEnv
     });
+
+    // Close the parent's copies that were handed to the child.
+    // fdReqRead:  parent never reads from the command pipe; keeping it open
+    //             would prevent GJS from seeing EOF when fdReqWrite is closed.
+    // fdResWrite: parent never writes to the response pipe; keeping it open
+    //             would prevent Node from seeing EOF when GJS exits.
+    fs.closeSync(fdReqRead);
+    fs.closeSync(fdResWrite);
 
     setProc(proc);
     proc.unref();
@@ -95,10 +126,7 @@ export function initialize() {
         process.exit(1);
     });
 
-    const fdWrite = fs.openSync(reqPath, 'w');
-    const fdRead = fs.openSync(resPath, 'r');
-
-    const ipc = new IpcWorker(fdRead, fdWrite, (res: any) => {
+    const ipc = new IpcWorker(fdResRead, fdReqWrite, (res: any) => {
         const cb = callbackRegistry.get(res.callbackId!);
         if (cb) {
             const wrappedArgs = (res.args || []).map((arg: any) => createProxy(arg));
