@@ -38,6 +38,10 @@ function ConvertToProtocol(obj) {
     if (t === 'string' || t === 'number' || t === 'boolean') {
         return { type: 'primitive', value: obj };
     }
+    // Uint8Array: pass by value (e.g. GBytes.get_data() results).
+    if (obj instanceof Uint8Array) {
+        return { type: 'uint8array', value: Array.from(obj) };
+    }
     if (Array.isArray(obj)) {
         return { type: 'array', value: obj.map(ConvertToProtocol) };
     }

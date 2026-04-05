@@ -37,6 +37,7 @@ export function makeFnProxy(parentId: string, methodName: string, fnId?: string)
 
 export function createProxy(meta: any): any {
     if (meta.type === 'primitive' || meta.type === 'null') return meta.value;
+    if (meta.type === 'uint8array') return new Uint8Array(meta.value);
     if (meta.type === 'array') return meta.value.map((item: any) => createProxy(item));
     if (meta.type !== 'ref') return undefined;
 
