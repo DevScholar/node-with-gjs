@@ -5,6 +5,18 @@ import { createProxy } from './proxy.js';
 // Delay between event-drain polls while the GTK main loop is running.
 const POLL_INTERVAL_MS = 16;
 
+// Post-drain hooks: callbacks executed at the end of every drainEvents() tick.
+// Used by consumers (e.g. node-with-window) that need deferred work to run
+// outside a GJS signal handler context, without relying on setImmediate/setTimeout
+// (which can stall when the event loop doesn't cycle after readOne() busy-wait).
+const postDrainHooks = new Set<() => void>();
+
+/** Register a callback to run after each event-drain tick. */
+export function addPostDrainHook(fn: () => void): void { postDrainHooks.add(fn); }
+
+/** Remove a previously registered post-drain hook. */
+export function removePostDrainHook(fn: () => void): void { postDrainHooks.delete(fn); }
+
 function drainEvents() {
     const ipc = getIpc();
     if (!ipc) return;
@@ -38,6 +50,13 @@ function drainEvents() {
             }
         }
     } catch { /* ignore if GJS exited */ }
+    // Run post-drain hooks (deferred close-request handlers, etc.)
+    if (postDrainHooks.size > 0) {
+        console.error(`[node-with-gjs] Running ${postDrainHooks.size} post-drain hook(s)`);
+        for (const hook of postDrainHooks) {
+            try { hook(); } catch (e) { console.error('[node-with-gjs] Post-drain hook error:', e); }
+        }
+    }
 }
 
 export function startPolling() {

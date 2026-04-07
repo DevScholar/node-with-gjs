@@ -1,10 +1,11 @@
 // src/index.ts
 import { initialize } from './lifecycle.js';
-import { startPolling } from './poll.js';
+import { startPolling, addPostDrainHook, removePostDrainHook } from './poll.js';
 import { createProxy } from './proxy.js';
 import { getIpc, callbackRegistry, objectCallbacks, proxyCache, releaseQueue, namespaceCache, giVersions } from './state.js';
 
 export { callbackRegistry } from './state.js';
+export { addPostDrainHook, removePostDrainHook } from './poll.js';
 
 export function init() {
     initialize();
