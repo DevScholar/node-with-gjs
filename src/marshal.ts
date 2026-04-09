@@ -20,7 +20,15 @@ export function wrapArg(arg: any, ownerObjectId?: string): any {
         // Sync functions: GJS blocks in processNestedCommands until Node.js replies;
         // the return value reaches GTK (e.g. close-request → true, draw-func calls).
         const isAsync = arg.constructor?.name === 'AsyncFunction';
-        return { type: 'callback', callbackId: cbId, async: isAsync };
+        const descriptor: any = { type: 'callback', callbackId: cbId, async: isAsync };
+        // syncReturn: for async callbacks that need to return a value synchronously
+        // to GTK while still processing asynchronously in Node.js.
+        // E.g. close-request must return true (prevent auto-close) immediately,
+        // but the actual close logic runs asynchronously in Node.js.
+        if ((arg as any).__syncReturn !== undefined) {
+            descriptor.syncReturn = (arg as any).__syncReturn;
+        }
+        return descriptor;
     }
 
     if (Array.isArray(arg)) return { type: 'array', value: arg.map(a => wrapArg(a, ownerObjectId)) };

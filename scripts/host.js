@@ -94,11 +94,15 @@ function ResolveArg(arg) {
     if (arg.type === 'callback') {
         if (arg.async) {
             // Async callback: enqueue to eventQueue, Node.js drains via Poll.
-            // Return immediately so GJS doesn't block.
+            // Return syncReturn value (if specified) or null so GJS doesn't block.
+            // syncReturn allows the callback to return a value synchronously to GTK
+            // (e.g. true for close-request to prevent auto-close) while still
+            // processing the event asynchronously in Node.js.
+            const syncReturnValue = arg.syncReturn !== undefined ? arg.syncReturn : null;
             return (...cbArgs) => {
                 const mappedArgs = cbArgs.map(ConvertToProtocol);
                 eventQueue.push({ callbackId: arg.callbackId, args: mappedArgs });
-                return null;
+                return syncReturnValue;
             };
         } else {
             // Sync callback: send event to Node.js and block until reply.
