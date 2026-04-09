@@ -1,6 +1,5 @@
 // src/poll.ts
-import { getIpc, getPollInterval, setPollInterval, releaseQueue, callbackRegistry } from './state.js';
-import { createProxy } from './proxy.js';
+import { getIpc, getPollInterval, setPollInterval, releaseQueue } from './state.js';
 
 // Delay between event-drain polls while the GTK main loop is running.
 const POLL_INTERVAL_MS = 16;
@@ -26,7 +25,9 @@ function drainEvents() {
             try { ipc.send({ action: 'Release', targetId: id }); } catch {}
         }
     }
-    // Drain pending sync events from the port (button clicks, draw-func, etc.)
+    // Drain pending messages from the port (sync events, async events, EOF).
+    // Async events are delivered directly via the output pipe (bypassing the
+    // old Poll round-trip), so we only need to read from the MessagePort here.
     ipc.drainEvents();
     // Check if GJS has exited (detected by the worker getting EOF).
     if (ipc.isExited) {
@@ -34,25 +35,8 @@ function drainEvents() {
         if (pi) { clearInterval(pi); setPollInterval(null); }
         return;
     }
-    // Drain async callback events from GJS's eventQueue via Poll.
-    try {
-        const res = ipc.send({ action: 'Poll' });
-        if (res?.type === 'exit') {
-            const pi = getPollInterval();
-            if (pi) { clearInterval(pi); setPollInterval(null); }
-        } else if (res && res.type === 'poll' && Array.isArray(res.events)) {
-            for (const ev of res.events) {
-                const cb = callbackRegistry.get(ev.callbackId);
-                if (cb) {
-                    const wrappedArgs = (ev.args || []).map((arg: any) => createProxy(arg));
-                    try { cb(...wrappedArgs); } catch(e) { console.error('[node-with-gjs] Callback error:', e); }
-                }
-            }
-        }
-    } catch { /* ignore if GJS exited */ }
     // Run post-drain hooks (deferred close-request handlers, etc.)
     if (postDrainHooks.size > 0) {
-        console.error(`[node-with-gjs] Running ${postDrainHooks.size} post-drain hook(s)`);
         for (const hook of postDrainHooks) {
             try { hook(); } catch (e) { console.error('[node-with-gjs] Post-drain hook error:', e); }
         }

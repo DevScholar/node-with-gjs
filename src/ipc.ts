@@ -48,6 +48,16 @@ export class IpcWorker {
         return msg.message;
     }
 
+    // Handle a GJS-initiated async event: call the JS callback.
+    // Unlike sync events, no reply is sent — GJS isn't waiting.
+    private handleAsyncEvent(eventData: any) {
+        try {
+            this.onEvent(eventData);
+        } catch (e) {
+            console.error('[node-with-gjs] Async callback error:', e);
+        }
+    }
+
     // Handle a GJS-initiated sync event: call the JS callback and send the
     // return value back to GJS so the signal handler gets the correct return value.
     private handleEvent(eventData: any) {
@@ -87,6 +97,10 @@ export class IpcWorker {
                 this.handleEvent(msg.data);
                 continue; // keep waiting for the real response
             }
+            if (msg.kind === 'async_event') {
+                this.handleAsyncEvent(msg.data);
+                continue; // keep waiting for the real response
+            }
             const res = msg.data;
             if (res._seq !== expectedSeq) {
                 // This response belongs to a different pending send() call.
@@ -121,7 +135,12 @@ export class IpcWorker {
         let msg: ReturnType<typeof receiveMessageOnPort>;
         while ((msg = receiveMessageOnPort(this.port))) {
             const { kind, data } = msg.message;
-            if (kind === 'event') this.handleEvent(data);
+            if (kind === 'event') {
+                this.handleEvent(data);
+            }
+            else if (kind === 'async_event') {
+                this.handleAsyncEvent(data);
+            }
             else if (kind === 'eof') { this.exited = true; break; }
             // unexpected 'response' messages between commands are harmless; ignore
         }

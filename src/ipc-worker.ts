@@ -47,6 +47,8 @@ while (true) {
         continue; // skip malformed JSON
     }
     // 'event' = GJS-initiated sync callback (needs a reply before GJS continues)
+    // 'async_event' = GJS-initiated async callback (no reply needed)
     // everything else = response to a command sent by the main thread
-    port.postMessage({ kind: msg.type === 'event' ? 'event' : 'response', data: msg });
+    const kind = msg.type === 'event' ? 'event' : msg.type === 'async_event' ? 'async_event' : 'response';
+    port.postMessage({ kind, data: msg });
 }

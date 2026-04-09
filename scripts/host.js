@@ -93,15 +93,19 @@ function ResolveArg(arg) {
     }
     if (arg.type === 'callback') {
         if (arg.async) {
-            // Async callback: enqueue to eventQueue, Node.js drains via Poll.
-            // Return syncReturn value (if specified) or null so GJS doesn't block.
+            // Async callback: write event directly to the output pipe so the
+            // ipc-worker thread picks it up immediately.  This bypasses the
+            // io_add_watch + Poll round-trip which is unreliable on WSL2 —
+            // GLib's g_poll() sometimes doesn't wake for pipe data, causing
+            // events to stall until another GTK event occurs.
             // syncReturn allows the callback to return a value synchronously to GTK
             // (e.g. true for close-request to prevent auto-close) while still
             // processing the event asynchronously in Node.js.
             const syncReturnValue = arg.syncReturn !== undefined ? arg.syncReturn : null;
             return (...cbArgs) => {
                 const mappedArgs = cbArgs.map(ConvertToProtocol);
-                eventQueue.push({ callbackId: arg.callbackId, args: mappedArgs });
+                const msg = { type: 'async_event', callbackId: arg.callbackId, args: mappedArgs };
+                dataOut.put_string(JSON.stringify(msg) + '\n', null);
                 return syncReturnValue;
             };
         } else {
@@ -200,6 +204,13 @@ function executeCommand(cmd) {
 
 function bindIPCEvent() {
     const channel = GLib.IOChannel.unix_new(3);
+    // Keepalive timer: ensures g_poll() returns periodically so io_add_watch
+    // is checked even when no GTK events are occurring.  On WSL2, pipe-fd
+    // readability sometimes doesn't wake g_poll(-1), causing IPC commands
+    // from Node.js to stall until another GTK event arrives.  A 50 ms tick
+    // bounds the worst-case stall to 50 ms.
+    GLib.timeout_add(GLib.PRIORITY_LOW, 50, () => GLib.SOURCE_CONTINUE);
+
     GLib.io_add_watch(channel, GLib.PRIORITY_DEFAULT, GLib.IOCondition.IN, (channel, condition) => {
         try {
             const [line] = dataIn.read_line_utf8(null);
