@@ -1,12 +1,13 @@
-// src/proxy.ts
 import { getIpc, proxyCache, gcRegistry } from './state.js';
 import { wrapArg } from './marshal.js';
 import { startPolling } from './poll.js';
+import type { GjsProxy, GjsRef } from './types.js';
 
-// Create a proxy for a GJS function that supports both calling (as a method on
-// its parent) and static property access (via the function's own ref id).
-// parentId + methodName → Invoke/NewProp;  fnId → Get for sub-properties.
-export function makeFnProxy(parentId: string, methodName: string, fnId?: string): any {
+export type { GjsProxy } from './types.js';
+
+type ProxyResult<T extends object = object> = GjsProxy<T> | undefined | null | number | string | boolean | Uint8Array | GjsProxy<object>[];
+
+export function makeFnProxy<T extends object = object>(parentId: string, methodName: string, fnId?: string): GjsProxy<T> {
     return new Proxy(function() {}, {
         get: fnId ? (_t: any, subProp: string | symbol) => {
             if (subProp === '__ref') return fnId;
@@ -30,12 +31,12 @@ export function makeFnProxy(parentId: string, methodName: string, fnId?: string)
         construct: (_t: any, args: any[]) => {
             const netArgs = args.map(a => wrapArg(a, parentId));
             const res = getIpc()!.send({ action: 'NewProp', targetId: parentId, property: methodName, args: netArgs });
-            return createProxy(res);
+            return createProxy(res) as GjsProxy<T>;
         }
-    });
+    }) as GjsProxy<T>;
 }
 
-export function createProxy(meta: any): any {
+export function createProxy<T extends object = object>(meta: any): ProxyResult<T> {
     if (meta.type === 'primitive' || meta.type === 'null') return meta.value;
     if (meta.type === 'uint8array') return new Uint8Array(meta.value);
     if (meta.type === 'array') return meta.value.map((item: any) => createProxy(item));
@@ -43,11 +44,10 @@ export function createProxy(meta: any): any {
 
     const id = meta.id!;
 
-    // Return the existing live proxy for this id (prevents duplicate-release on GC)
     const cached = proxyCache.get(id);
     if (cached) {
         const existing = cached.deref();
-        if (existing) return existing;
+        if (existing) return existing as GjsProxy<T>;
     }
 
     const stub = function() {};
@@ -74,11 +74,11 @@ export function createProxy(meta: any): any {
         construct: (target: any, args: any[]) => {
             const netArgs = args.map(a => wrapArg(a, id));
             const res = getIpc()!.send({ action: 'New', typeId: id, args: netArgs });
-            return createProxy(res);
+            return createProxy(res) as GjsProxy<T>;
         }
-    });
+    }) as GjsProxy<T>;
 
-    proxyCache.set(id, new WeakRef(proxy));
+    proxyCache.set(id, new WeakRef(proxy as unknown as GjsRef));
     gcRegistry.register(proxy, id);
     return proxy;
 }

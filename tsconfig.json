@@ -15,7 +15,8 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": false,
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "types": ["node", "@girs/gjs"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
