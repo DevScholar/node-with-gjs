@@ -1,4 +1,5 @@
 // src/marshal.ts
+import { randomUUID } from 'node:crypto';
 import { callbackRegistry, objectCallbacks } from './state.js';
 
 export function wrapArg(arg: any, ownerObjectId?: string): any {
@@ -10,7 +11,7 @@ export function wrapArg(arg: any, ownerObjectId?: string): any {
     }
 
     if (typeof arg === 'function') {
-        const cbId = `cb_${Date.now()}_${Math.random()}`;
+        const cbId = `cb_${randomUUID()}`;
         callbackRegistry.set(cbId, arg);
         if (ownerObjectId) {
             if (!objectCallbacks.has(ownerObjectId)) objectCallbacks.set(ownerObjectId, []);
