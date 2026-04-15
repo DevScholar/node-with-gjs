@@ -1,7 +1,7 @@
 import { initialize } from './lifecycle.js';
 import { startPolling, addPostDrainHook, removePostDrainHook } from './poll.js';
 import { createProxy } from './proxy.js';
-import { getIpc, callbackRegistry, objectCallbacks, proxyCache, releaseQueue, namespaceCache, giVersions } from './state.js';
+import { getIpc, callbackRegistry, objectCallbacks, proxyCache, releaseQueue, namespaceCache, giVersions, unpinProxy } from './state.js';
 import type { GjsRef, GiNamespaceMap, GiVersionsProxy } from './types.js';
 
 export { callbackRegistry } from './state.js';
@@ -16,6 +16,7 @@ export function releaseObject(proxy: GjsRef): void {
     const id = proxy?.__ref;
     if (!id || !getIpc()) return;
     proxyCache.delete(id);
+    unpinProxy(id);
     try { getIpc()!.send({ action: 'Release', targetId: id }); } catch {}
     const cbs = objectCallbacks.get(id);
     if (cbs) {

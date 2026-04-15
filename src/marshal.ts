@@ -1,6 +1,6 @@
 // src/marshal.ts
 import { randomUUID } from 'node:crypto';
-import { callbackRegistry, objectCallbacks } from './state.js';
+import { callbackRegistry, objectCallbacks, pinProxy } from './state.js';
 
 export function wrapArg(arg: any, ownerObjectId?: string): any {
     if (arg === null || arg === undefined) return { type: 'null' };
@@ -16,6 +16,9 @@ export function wrapArg(arg: any, ownerObjectId?: string): any {
         if (ownerObjectId) {
             if (!objectCallbacks.has(ownerObjectId)) objectCallbacks.set(ownerObjectId, []);
             objectCallbacks.get(ownerObjectId)!.push(cbId);
+            // Keep the owner proxy alive while it has signal handlers,
+            // matching real GJS where GObject signal connections prevent GC.
+            pinProxy(ownerObjectId);
         }
         // Async functions: enqueue event in GJS, drain via Poll from setInterval.
         // Sync functions: GJS blocks in processNestedCommands until Node.js replies;

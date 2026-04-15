@@ -8,6 +8,25 @@ export const releaseQueue: string[] = [];
 
 export const proxyCache = new Map<string, WeakRef<GjsRef>>();
 
+// Strong references to proxies that have active signal callbacks.
+// Prevents V8 GC from collecting a proxy whose GJS-side GObject is still
+// alive (e.g. a Gtk.Button in a widget tree).  Matches real GJS behaviour
+// where GObject signal connections prevent the callback from being collected.
+export const connectedProxies = new Map<string, GjsRef>();
+
+/** Pin a proxy so it is not GC'd while it has active callbacks. */
+export function pinProxy(id: string): void {
+    if (connectedProxies.has(id)) return;
+    const weak = proxyCache.get(id);
+    const ref = weak?.deref();
+    if (ref) connectedProxies.set(id, ref);
+}
+
+/** Unpin a proxy when it has no more callbacks. */
+export function unpinProxy(id: string): void {
+    connectedProxies.delete(id);
+}
+
 export const gcRegistry = new FinalizationRegistry((id: string) => {
     proxyCache.delete(id);
     releaseQueue.push(id);
@@ -16,6 +35,7 @@ export const gcRegistry = new FinalizationRegistry((id: string) => {
         for (const cbId of cbs) callbackRegistry.delete(cbId);
         objectCallbacks.delete(id);
     }
+    connectedProxies.delete(id);
 });
 
 export const namespaceCache = new Map<string, GjsRef>();
