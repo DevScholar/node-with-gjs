@@ -100,10 +100,28 @@ export function initialize() {
 
     // Spawn GJS directly, passing fds as integers per the Node.js docs.
     // Node.js calls dup2(fdReqRead, 3) and dup2(fdResWrite, 4) in the child.
-    const proc = cp.spawn(gjsPath, ['-m', scriptPath], {
-        stdio: ['inherit', 'inherit', 'inherit', fdReqRead, fdResWrite],
-        env: spawnEnv
-    });
+    //
+    // Deno does not support integer-fd stdio inheritance in child_process.spawn.
+    // Use bash as a shim: it opens the FIFOs by path and redirects them onto
+    // fd 3 and fd 4 before exec-ing GJS, so GJS sees the same fd layout.
+    // Both ends are already open in Node from the three-step trick above, so
+    // bash's open() unblocks immediately without any deadlock risk.
+    // TODO: remove bash shim and use the Node.js path for Deno too once
+    //       denoland/deno#33140 ships in a stable release.
+    const isDenoRuntime = typeof (globalThis as any).Deno !== 'undefined';
+    function sq(s: string): string { return `'${s.replace(/'/g, "'\\''")}'`; }
+    const proc = isDenoRuntime
+        ? cp.spawn('bash', [
+              '-c',
+              `exec ${sq(gjsPath)} -m ${sq(scriptPath)} 3<${sq(reqPath)} 4>${sq(resPath)}`
+          ], {
+              stdio: ['inherit', 'inherit', 'inherit'],
+              env: spawnEnv
+          })
+        : cp.spawn(gjsPath, ['-m', scriptPath], {
+              stdio: ['inherit', 'inherit', 'inherit', fdReqRead, fdResWrite],
+              env: spawnEnv
+          });
 
     // Close the parent's copies that were handed to the child.
     // fdReqRead:  parent never reads from the command pipe; keeping it open
@@ -136,7 +154,7 @@ export function initialize() {
             return wrapArg(result);
         }
         return { type: 'null' };
-    });
+    }, isDenoRuntime ? resPath : undefined);
 
     setIpc(ipc);
 

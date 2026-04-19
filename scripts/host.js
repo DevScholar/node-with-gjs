@@ -18,11 +18,21 @@ if (!InputStream || !OutputStream) {
     System.exit(1);
 }
 
-const inStream = new InputStream({ fd: 3, close_fd: false });
-const outStream = new OutputStream({ fd: 4, close_fd: false });
+// Deno cannot inherit integer fds via child_process.spawn; it passes the FIFO
+// paths via env vars instead.  GJS opens them by path using Gio.File.
+const _reqPath = GLib.getenv('NWGJS_REQ_PATH');
+const _resPath = GLib.getenv('NWGJS_RES_PATH');
 
-const dataIn = new Gio.DataInputStream({ base_stream: inStream });
-const dataOut = new Gio.DataOutputStream({ base_stream: outStream });
+let dataIn, dataOut;
+if (_reqPath && _resPath) {
+    dataIn  = new Gio.DataInputStream({ base_stream: Gio.File.new_for_path(_reqPath).read(null) });
+    dataOut = new Gio.DataOutputStream({ base_stream: Gio.File.new_for_path(_resPath).append_to(Gio.FileCreateFlags.NONE, null) });
+} else {
+    const inStream  = new InputStream({ fd: 3, close_fd: false });
+    const outStream = new OutputStream({ fd: 4, close_fd: false });
+    dataIn  = new Gio.DataInputStream({ base_stream: inStream });
+    dataOut = new Gio.DataOutputStream({ base_stream: outStream });
+}
 
 const objectStore = new Map();
 // Queue of async callback events waiting to be drained by a Poll command.

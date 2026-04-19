@@ -20,14 +20,19 @@ export class IpcWorker {
     constructor(
         private fdRead: number,
         private fdWrite: number,
-        private onEvent: (msg: any) => any
+        private onEvent: (msg: any) => any,
+        // Deno workaround: worker isolates have separate resource tables, so the
+        // fdRead RID from the main thread is unusable in the worker.  Pass the
+        // FIFO path and let the worker open its own fd.
+        // TODO: remove fdReadPath once denoland/deno#33039 ships in a stable release.
+        fdReadPath?: string,
     ) {
         const { port1, port2 } = new MessageChannel();
         this.port = port1;
 
         const workerPath = path.join(__dirname, 'ipc-worker.js');
         this.worker = new Worker(workerPath, {
-            workerData: { fdRead, port: port2 },
+            workerData: { fdRead, fdReadPath: fdReadPath ?? null, port: port2 },
             transferList: [port2]
         });
         // Start unref'd so console scripts (no app.run()) exit naturally when done.
