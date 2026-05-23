@@ -5,6 +5,7 @@
   "main": "./dist/index.js",
   "types": "./types/index.d.ts",
   "type": "module",
+  "os": ["linux"],
   "license": "MIT",
   "files": [
     "dist",
