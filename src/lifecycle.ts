@@ -22,14 +22,17 @@ export function cleanup() {
 
     const pi = getPollInterval();
     if (pi) { clearInterval(pi); setPollInterval(null); }
-    const ipc = getIpc();
-    if (ipc) try { ipc.close(); } catch {}
+    // Kill the GJS process FIRST so the worker's blocking readSync on fdRead
+    // unblocks with EOF; otherwise ipc.close() → worker.terminate() deadlocks
+    // waiting for the worker to finish its read.
     const proc = getProc();
     if (proc && !proc.killed) try { proc.kill('SIGKILL'); } catch {}
+    const ipc = getIpc();
+    if (ipc) try { ipc.close(); } catch {}
     const reqPath = getReqPath();
     const resPath = getResPath();
-    if (fs.existsSync(reqPath)) try { fs.unlinkSync(reqPath); } catch {}
-    if (fs.existsSync(resPath)) try { fs.unlinkSync(resPath); } catch {}
+    if (reqPath && fs.existsSync(reqPath)) try { fs.unlinkSync(reqPath); } catch {}
+    if (resPath && fs.existsSync(resPath)) try { fs.unlinkSync(resPath); } catch {}
 
     setProc(null);
     setIpc(null);
@@ -167,4 +170,38 @@ export function initialize() {
     }
 
     setInitialized(true);
+
+    // Linux: process.stdout / process.stderr may hold refs that prevent clean
+    // exit (matching node-with-jxa's approach).  Unref them so a non-GUI script
+    // can drain the event loop and fire beforeExit naturally.
+    (process.stdout as any).unref?.();
+    (process.stderr as any).unref?.();
+
+    // Auto-exit watchdog: the worker thread and other handles can keep the
+    // event loop alive in ways that prevent 'beforeExit' from firing naturally,
+    // so we poll and exit once the script has no app run loop active and the
+    // event loop has no pending user work.  refForApp() sets appRunning=true,
+    // which disables the watchdog for GUI scripts.
+    let stableTicks = 0;
+    let lastSnapshot = '';
+    const watchdog = setInterval(() => {
+        if (!getInitialized()) { clearInterval(watchdog); return; }
+        const curIpc = getIpc();
+        if (curIpc && (curIpc as any).appRunning) { clearInterval(watchdog); return; }
+        // Drain any pending GJS events before deciding to exit.
+        try { curIpc?.drainEvents(); } catch {}
+        const info = (process as any).getActiveResourcesInfo?.() as string[] | undefined;
+        const filtered = (info || []).filter(t => t !== 'Timeout' && t !== 'Immediate');
+        const snapshot = filtered.slice().sort().join(',');
+        if (snapshot === lastSnapshot) {
+            if (++stableTicks >= 2) {
+                clearInterval(watchdog);
+                cleanup();
+                process.exit(0);
+            }
+        } else {
+            lastSnapshot = snapshot;
+            stableTicks = 0;
+        }
+    }, 150);
 }

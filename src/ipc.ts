@@ -13,9 +13,13 @@ export class IpcWorker {
     private port: MessagePort;
     private exited = false;
     private seqCounter = 0;
-    // Stash for out-of-order responses: if waitResponse(seq=2) reads a response
-    // with seq=1, it stashes it here so waitResponse(seq=1) can find it later.
     private stash = new Map<number, any>();
+    // Notification slot: worker stores Atomics.notify after every postMessage.
+    // Main thread Atomics.wait()s on it, avoiding a 100% CPU spin in readOne.
+    private notify: Int32Array;
+    // Cap to prevent unbounded growth if a low _seq response is permanently
+    // missing (host bug). Bigger than any plausible legitimate burst.
+    private static readonly MAX_STASH = 4096;
 
     constructor(
         private fdRead: number,
@@ -29,10 +33,21 @@ export class IpcWorker {
     ) {
         const { port1, port2 } = new MessageChannel();
         this.port = port1;
+        // Unref the port so it doesn't keep Node's event loop alive when nothing
+        // else is running (e.g. after a non-GUI script finishes).  The worker is
+        // also unref'd below for the same reason.  refForApp() re-refs the worker
+        // when a Gio.Application run loop is active.
+        (port1 as any).unref?.();
+
+        // Shared notification slot — worker bumps this and Atomics.notify()s
+        // after every postMessage so readOne() can Atomics.wait() instead of
+        // spinning on receiveMessageOnPort.
+        const notifyBuf = new SharedArrayBuffer(4);
+        this.notify = new Int32Array(notifyBuf);
 
         const workerPath = path.join(__dirname, 'ipc-worker.js');
         this.worker = new Worker(workerPath, {
-            workerData: { fdRead, fdReadPath: fdReadPath ?? null, port: port2 },
+            workerData: { fdRead, fdReadPath: fdReadPath ?? null, port: port2, notify: notifyBuf },
             transferList: [port2]
         });
         // Start unref'd so console scripts (no app.run()) exit naturally when done.
@@ -45,12 +60,22 @@ export class IpcWorker {
     }
 
     // Spin-receive: returns the next message from the worker.
-    // receiveMessageOnPort() is a synchronous, non-blocking call.
-    // GJS responds in microseconds, so the spin is extremely brief.
+    // Atomics.wait avoids a 100% CPU busy-spin (matching node-with-jxa's IPC).
     private readOne(): { kind: string; data?: any } {
         let msg: ReturnType<typeof receiveMessageOnPort>;
-        while (!(msg = receiveMessageOnPort(this.port))) {}
-        return msg.message;
+        // Drain anything already queued without blocking first.
+        if ((msg = receiveMessageOnPort(this.port))) return msg.message;
+        // Block on the worker's notification slot. Atomics.wait yields the
+        // thread (no CPU spin); the worker calls Atomics.notify after every
+        // post. Re-check after each wake because notifications can be
+        // coalesced across multiple posts.
+        while (true) {
+            const seen = Atomics.load(this.notify, 0);
+            if ((msg = receiveMessageOnPort(this.port))) return msg.message;
+            // 'timed-out' here just means we should re-check the port; this
+            // gives us a periodic safety wake without burning CPU.
+            Atomics.wait(this.notify, 0, seen, 1000);
+        }
     }
 
     // Handle a GJS-initiated async event: call the JS callback.
@@ -67,14 +92,25 @@ export class IpcWorker {
     // return value back to GJS so the signal handler gets the correct return value.
     private handleEvent(eventData: any) {
         let result: any = null;
+        let errorMessage: string | null = null;
         try {
             result = this.onEvent(eventData);
-        } catch (e) {
+        } catch (e: any) {
+            errorMessage = (e && (e.stack || e.message)) || String(e);
             console.error('[node-with-gjs] Callback error:', e);
         }
+        const reply = errorMessage !== null
+            ? { type: 'reply', error: errorMessage }
+            : { type: 'reply', result };
         try {
-            fs.writeSync(this.fdWrite, JSON.stringify({ type: 'reply', result }) + '\n');
-        } catch {}
+            fs.writeSync(this.fdWrite, JSON.stringify(reply) + '\n');
+        } catch (e) {
+            // The host died (or the pipe was closed mid-callback). Mark exited
+            // so the next send() throws clearly instead of hanging in
+            // waitResponse.
+            this.exited = true;
+            console.error('[node-with-gjs] Failed to send callback reply (pipe closed):', e);
+        }
     }
 
     // Wait for the response to the current command.
@@ -96,20 +132,15 @@ export class IpcWorker {
             const msg = this.readOne();
             if (msg.kind === 'eof') {
                 this.exited = true;
-                return { type: 'exit' };
+                throw new Error('GJS host exited unexpectedly (likely a GJS crash). The last call probably triggered an internal GJS bug — try a different API.');
             }
-            if (msg.kind === 'event') {
-                this.handleEvent(msg.data);
-                continue; // keep waiting for the real response
-            }
-            if (msg.kind === 'async_event') {
-                this.handleAsyncEvent(msg.data);
-                continue; // keep waiting for the real response
-            }
+            if (msg.kind === 'event') { this.handleEvent(msg.data); continue; }
+            if (msg.kind === 'async_event') { this.handleAsyncEvent(msg.data); continue; }
             const res = msg.data;
             if (res._seq !== expectedSeq) {
-                // This response belongs to a different pending send() call.
-                // Stash it so the right waitResponse() can pick it up.
+                if (this.stash.size >= IpcWorker.MAX_STASH) {
+                    throw new Error(`GJS IPC stash overflow (>${IpcWorker.MAX_STASH} pending out-of-order responses; expected _seq=${expectedSeq}). This indicates a host protocol bug.`);
+                }
                 this.stash.set(res._seq, res);
                 continue;
             }
@@ -119,13 +150,13 @@ export class IpcWorker {
     }
 
     send(cmd: any): any {
-        if (this.exited) return { type: 'exit' };
+        if (this.exited) throw new Error('GJS host has exited; cannot send further commands.');
         const seq = ++this.seqCounter;
         cmd._seq = seq;
-        try {
-            fs.writeSync(this.fdWrite, JSON.stringify(cmd) + '\n');
-        } catch {
-            throw new Error('Pipe closed (Write failed)');
+        try { fs.writeSync(this.fdWrite, JSON.stringify(cmd) + '\n'); }
+        catch (e: any) {
+            this.exited = true;
+            throw new Error(`GJS IPC pipe write failed (host likely exited): ${e?.message || e}`);
         }
         return this.waitResponse(seq);
     }
@@ -140,20 +171,18 @@ export class IpcWorker {
         let msg: ReturnType<typeof receiveMessageOnPort>;
         while ((msg = receiveMessageOnPort(this.port))) {
             const { kind, data } = msg.message;
-            if (kind === 'event') {
-                this.handleEvent(data);
-            }
-            else if (kind === 'async_event') {
-                this.handleAsyncEvent(data);
-            }
+            if (kind === 'event') this.handleEvent(data);
+            else if (kind === 'async_event') this.handleAsyncEvent(data);
             else if (kind === 'eof') { this.exited = true; break; }
-            // unexpected 'response' messages between commands are harmless; ignore
         }
     }
 
     /** Re-ref the worker when a Gio.Application.run() is detected, so Node.js
      *  stays alive until GJS exits and the worker receives EOF. */
-    refForApp() { this.worker.ref(); }
+    refForApp() { this.worker.ref(); this.appRunning = true; }
+
+    /** True once an app event loop has been handed control to GJS via runApp. */
+    appRunning = false;
 
     get isExited(): boolean { return this.exited; }
 
