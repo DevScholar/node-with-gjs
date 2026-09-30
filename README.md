@@ -1,4 +1,4 @@
-# node-with-gjs
+# Node with GJS
 
 > Beta
 
