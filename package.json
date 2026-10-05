@@ -38,10 +38,16 @@
     "test": "vitest run",
     "start": "node start.js"
   },
+  "dependencies": {
+    "@girs/gjs": "^5.5.0",
+    "@girs/glib-2.0": "^5.5.0",
+    "@girs/gobject-2.0": "^5.5.0",
+    "@girs/gtk-4.0": "^5.5.0",
+    "@girs/gdk-4.0": "^5.5.0",
+    "@girs/gio-2.0": "^5.5.0",
+    "@girs/webkit-6.0": "^5.5.0"
+  },
   "devDependencies": {
-    "@girs/gjs": "^4.0.0-rc.1",
-    "@girs/glib-2.0": "^2.88.0-4.0.0-rc.1",
-    "@girs/gobject-2.0": "^2.88.0-4.0.0-rc.1",
     "@types/node": "^20.0.0",
     "typescript": "^5.9.3",
     "vitest": "^3.0.0"

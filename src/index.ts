@@ -8,6 +8,14 @@ export { callbackRegistry } from './state.js';
 export { addPostDrainHook, removePostDrainHook } from './poll.js';
 export type { GjsRef, GjsProxy, GiNamespaceMap, GiVersionsProxy } from './types.js';
 
+// Re-export GTK/WebKit type namespaces for downstream consumers (node-with-window's
+// gjs-gtk4 backend) so they don't need a direct dependency on @girs/* packages.
+export type { default as Gtk } from '@girs/gtk-4.0';
+export type { default as Gdk } from '@girs/gdk-4.0';
+export type { default as Gio } from '@girs/gio-2.0';
+export type { default as GLib } from '@girs/glib-2.0';
+export type { default as WebKit } from '@girs/webkit-6.0';
+
 export function init() {
     initialize();
 }
