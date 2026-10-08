@@ -1,11 +1,13 @@
 {
   "name": "@devscholar/node-with-gjs",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "description": "Node.js IPC Bridge for GJS",
   "main": "./dist/index.js",
   "types": "./types/index.d.ts",
   "type": "module",
-  "os": ["linux"],
+  "os": [
+    "linux"
+  ],
   "license": "MIT",
   "files": [
     "dist",
